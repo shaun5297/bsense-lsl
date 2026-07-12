@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bsense-lsl-experiment"
+version = "0.1.1"
+description = "Windows experiment control and LSL marker application for BSense-R and LabRecorder"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "pylsl==1.18.2",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: Microsoft :: Windows :: Windows 10",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering",
+]
+
+[project.scripts]
+bsense-experiment = "bsense_experiment.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

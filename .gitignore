@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Participant and generated data
+*.xdf
+*.jsonl
+*.csv.zip
+Raw_Data_*.zip
+data/*
+!data/README.md
+logs/
+outputs/
+reports/
+
+# Models and large artifacts
+*.joblib
+*.pt
+*.pth
+*.onnx
+
+# Build artifacts
+build/
+dist/
+
