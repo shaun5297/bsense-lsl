@@ -2,7 +2,7 @@
 
 ## 只有 events.jsonl，没有 XDF
 
-`events.jsonl` 只证明实验程序运行过。v0.1.1 会等待目标 XDF 创建，未创建时不会开始任务。
+`events.jsonl` 只证明实验程序运行过。v0.2.5 会等待目标 XDF 创建，未创建时不会开始任务。
 
 检查同名 `_recorder.jsonl`：
 
@@ -27,6 +27,15 @@
 4. 确认程序启动后能看到 `BSense Experiment Markers`；
 5. 重启顺序：BioMultiLite -> LSL Start -> 实验程序 -> LabRecorder Update。
 
+## 实时监测看不到流
+
+1. BioMultiLite 必须已连接头环；
+2. 在 BioMultiLite 的 LSL 页面勾选目标流并点击 `Start`；
+3. 点击实时监测窗口的“重新扫描”；
+4. 确认 BioMultiLite、LabRecorder 和本项目使用相同的 Windows 网络配置；
+5. 关闭 VPN、代理和不必要的虚拟网卡后重试；
+6. LabRecorder 能看到流但监测看不到时，记录流的 Name、Type 和 Channel count 以便检查厂商版本差异。
+
 ## EEG 出现恒定通道
 
 - 确认 BioMultiLite EEG 通道数与实际电极数一致；
@@ -45,4 +54,3 @@
 ## XDF 文件已存在
 
 程序不会覆盖已有 XDF 或日志。增加 Run 编号，例如从 `001` 改为 `002`。
-

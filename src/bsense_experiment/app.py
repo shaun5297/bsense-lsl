@@ -12,11 +12,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, messagebox, ttk
+from tkinter import BooleanVar, StringVar, Tk, Toplevel, messagebox, ttk
+from typing import TYPE_CHECKING
 
 from pylsl import IRREGULAR_RATE, StreamInfo, StreamOutlet, cf_string, local_clock
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .monitor import LiveMonitorWindow
 
 APP_VERSION = __version__
 MARKER_STREAM_NAME = "BSense Experiment Markers"
@@ -269,6 +273,7 @@ class BSenseExperimentApp:
         self.xdf_current_size = 0
         self.last_file_poll = 0.0
         self.recorder_log_path: Path | None = None
+        self.live_monitor: LiveMonitorWindow | None = None
 
         self._build_setup_view()
         self._build_task_view()
@@ -337,12 +342,25 @@ class BSenseExperimentApp:
         ttk.Button(self.setup_frame, text="发送测试 Marker", command=self.send_test_marker).grid(
             row=13, column=0, sticky="w", pady=(22, 0)
         )
+        ttk.Button(self.setup_frame, text="打开实时监测", command=self.open_live_monitor).grid(
+            row=13, column=1, sticky="w", padx=(14, 0), pady=(22, 0)
+        )
         ttk.Button(self.setup_frame, text="开始实验", command=self.start_experiment).grid(
             row=13, column=3, sticky="e", pady=(22, 0)
         )
 
         self.setup_frame.columnconfigure(1, weight=1)
         self.setup_frame.columnconfigure(2, weight=1)
+
+    def open_live_monitor(self) -> None:
+        monitor = self.live_monitor
+        if monitor is not None and monitor.window.winfo_exists():
+            monitor.window.lift()
+            monitor.window.focus_force()
+            return
+        from .monitor import LiveMonitorWindow
+
+        self.live_monitor = LiveMonitorWindow(Toplevel(self.root))
 
     def _build_task_view(self) -> None:
         self.task_frame = ttk.Frame(self.root, padding=32)
@@ -715,6 +733,7 @@ def run_self_test() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--short", action="store_true", help="Preselect the short integration protocol")
+    parser.add_argument("--monitor", action="store_true", help="Open only the BioMultiLite LSL live monitor")
     parser.add_argument("--self-test", action="store_true", help="Validate the protocol without opening the GUI")
     return parser.parse_args()
 
@@ -723,6 +742,11 @@ def main() -> None:
     args = parse_args()
     if args.self_test:
         run_self_test()
+        return
+    if args.monitor:
+        from .monitor import run_live_monitor
+
+        run_live_monitor()
         return
     root = Tk()
     BSenseExperimentApp(root, default_short=args.short)

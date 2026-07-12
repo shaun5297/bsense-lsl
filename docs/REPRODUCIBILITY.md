@@ -17,9 +17,9 @@
 ```text
 BioMultiLite 1.0.9-E-Release
 LabRecorder v1.17.1 release / Windows asset 1.17.0
-Python 3.11 x64
+Python 3.13 x64
 pylsl 1.18.2
-bsense-lsl-experiment 0.1.1
+bsense-lsl 0.2.5
 EEG 2 channels
 RCS 127.0.0.1:22345
 ```
@@ -69,4 +69,3 @@ RCS 127.0.0.1:22345
 - 佩戴位置、动作说明和文件命名规则。
 
 首次在新电脑运行时只使用 `pilot` 编号和短流程，不直接采正式被试。
-

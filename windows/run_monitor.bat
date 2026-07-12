@@ -10,6 +10,5 @@ if not exist "%VENV%\Scripts\python.exe" (
   exit /b 1
 )
 
-"%VENV%\Scripts\python.exe" -m bsense_experiment --self-test
-"%VENV%\Scripts\python.exe" -m unittest discover -s tests -v
-pause
+"%VENV%\Scripts\python.exe" -m bsense_experiment --monitor
+if errorlevel 1 pause
