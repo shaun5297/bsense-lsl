@@ -2,7 +2,7 @@
 
 ## 只有 events.jsonl，没有 XDF
 
-`events.jsonl` 只证明实验程序运行过。v0.2.5 会等待目标 XDF 创建，未创建时不会开始任务。
+`events.jsonl` 只证明实验程序运行过。v0.4.1 会等待目标 XDF 创建，未创建时不会开始任务。
 
 检查同名 `_recorder.jsonl`：
 
@@ -10,6 +10,8 @@
 - 每条 `rcs_command` 是否返回 `OK`；
 - 是否有 `xdf_created`；
 - 目标路径是否可写。
+
+如果界面在模块结束时提示等待 `stop` 超时，但 XDF 已经存在，请先查看 LabRecorder 是否仍在写盘。v0.4.1 已将停止命令的响应窗口从 5 秒延长到 60 秒；再次采集时必须增加 Run 编号，程序不会覆盖现有 XDF。
 
 ## 无法连接 RCS
 

@@ -15,8 +15,9 @@ BioMultiLite 负责连接头环并发布 LSL 流。实时监测和 LabRecorder �
 1. 在 BioMultiLite 连接 BSense-R。
 2. 打开 BioMultiLite 的 LSL 页面，勾选需要的数据流并点击 `Start`。
 3. 打开 `windows\run_monitor.bat`，确认相应页签持续收到样本。
-4. 打开 LabRecorder，点击 `Update`，确认相同数据流可见。
-5. 启动实验程序；可由程序通过 RCS 自动开始/停止 LabRecorder。
+4. 在实验程序“录制检查”页点击“自动扫描 LSL 数据流”，确认六类数值流齐全。
+5. 打开 LabRecorder，点击 `Update`，确认相同数据流及 BioMultiLite Marker 可见。
+6. 可由实验程序通过 RCS 自动开始/停止 LabRecorder。
 
 无需点击 BioMultiLite 左下角的本地 `REC`。LSL 开启后，BioMultiLite 本身不会保存这批数据，正式记录由 LabRecorder 写入 XDF。
 

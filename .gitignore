@@ -21,6 +21,7 @@ Thumbs.db
 # Participant and generated data
 *.xdf
 *.jsonl
+*_profile.json
 *.csv.zip
 Raw_Data_*.zip
 data/*
@@ -38,4 +39,3 @@ reports/
 # Build artifacts
 build/
 dist/
-

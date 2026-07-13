@@ -17,7 +17,7 @@ LabRecorder 将 7 条 BioMultiLite 流和 1 条实验 Marker 流写进同一个 
 示例：
 
 ```json
-{"code":201,"event":"head_left","block":"head_left","trial":1,"participant":"pilot01","session":"01","run":"001","task":"deviceqc","app_version":"0.2.5","unix_time":1783840000.0,"lsl_timestamp":416000.123456}
+{"code":301,"event":"mi_left","block":"run_1","trial":1,"condition":"mi_left","participant":"pilot01","session":"01","run":"001","task":"m1_mi","protocol_seed":123456789,"module_index":1,"module_count":3,"app_version":"0.4.1","unix_time":1783840000.0,"lsl_timestamp":416000.123456}
 ```
 
 字段：
@@ -32,11 +32,25 @@ LabRecorder 将 7 条 BioMultiLite 流和 1 条实验 Marker 流写进同一个 
 | `session` | 会话编号 |
 | `run` | 运行编号 |
 | `task` | 任务名 |
+| `protocol_seed` | 由被试、会话、Run 和任务派生的可复现随机种子 |
+| `module_index` / `module_count` | 本次连续采集中的模块位置和模块总数 |
 | `app_version` | 实验程序版本 |
 | `unix_time` | 系统 Unix 时间 |
 | `lsl_timestamp` | LSL 本地时钟时间戳 |
 
 `events.jsonl` 应与 XDF 中 `BSense Experiment Markers` 的 JSON 内容逐条一致。
+
+不同任务会增加任务特有字段：
+
+- N-Back：`level`、`nback_order`、`order_position`、`stimulus`、`is_target`、`responded`、`correct`、`reaction_time_s`，区块评分还包含 `correct_count`、`trial_count`、`accuracy`；
+- M0 问卷：`fatigue`、`sleep_quality`、`neuroactive_medication`；
+- M4A：`has_intent`、`object`、`condition`；
+- M4B：`round`、`position`、`object`、`target_object`、`is_target`。
+- 提示音：`audio_cue`、`audio_phase`；操作员异常标签使用编码 900–902。
+
+## 受限被试资料
+
+被试资料保存在 `participants/sub-{participant}_ses-{session}_profile.json`，包含姓名、年龄、性别、受教育年限、惯用手和知情同意状态。姓名不会复制到 XDF 或 Marker。共享生理数据前，应把整个 `participants` 目录排除在外。
 
 ## 实时窗口
 

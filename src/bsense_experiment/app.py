@@ -4,20 +4,36 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import socket
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, Toplevel, messagebox, ttk
-from typing import TYPE_CHECKING
+from tkinter import BooleanVar, PhotoImage, StringVar, Tk, Toplevel, messagebox, ttk
+from typing import TYPE_CHECKING, Callable
 
 from pylsl import IRREGULAR_RATE, StreamInfo, StreamOutlet, cf_string, local_clock
 
 from . import __version__
+from .participant import (
+    HAND_OPTIONS,
+    SEX_OPTIONS,
+    save_participant_profile,
+    validate_participant_profile,
+)
+from .live import STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, describe_stream
+from .protocols import (
+    PROTOCOLS,
+    PROTOCOL_BY_TASK,
+    InputField,
+    Step,
+    build_deviceqc_plan,
+    build_protocol_plan,
+    estimate_protocol_seconds,
+)
 
 if TYPE_CHECKING:
     from .monitor import LiveMonitorWindow
@@ -27,101 +43,19 @@ MARKER_STREAM_NAME = "BSense Experiment Markers"
 MARKER_STREAM_TYPE = "Markers"
 DEFAULT_RCS_HOST = "127.0.0.1"
 DEFAULT_RCS_PORT = 22345
+LABRECORDER_STOP_TIMEOUT = 60.0
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-@dataclass(frozen=True)
-class Step:
-    text: str
-    detail: str
-    duration: float
-    event: str | None = None
-    code: int | None = None
-    block: str | None = None
-    trial: int | None = None
-
-
-def build_deviceqc_plan(short: bool = False) -> list[Step]:
-    rest_seconds = 10.0 if short else 60.0
-    repetitions = 1 if short else 5
-    prepare_seconds = 1.0 if short else 2.0
-    cue_seconds = 2.0
-    recovery_seconds = 2.0 if short else 3.0
-
-    plan = [
-        Step("实验即将开始", "保持坐姿，双脚平放，尽量放松", 2.0, "experiment_start", 10),
-        Step("睁眼静息", "注视屏幕中央，保持头部不动", rest_seconds, "rest_open_start", 100),
-        Step("睁眼静息结束", "继续保持不动", 0.5, "rest_open_end", 101),
-        Step("闭眼静息", "轻轻闭眼，保持清醒和头部不动", rest_seconds, "rest_closed_start", 110),
-        Step("闭眼静息结束", "请睁开眼睛", 1.0, "rest_closed_end", 111),
-    ]
-
-    actions = [
-        ("blink", 120, "自然眨眼 1 次", "不要用力挤眼"),
-        ("jaw_clench", 130, "轻咬后放松", "咬紧约 1 秒，然后完全放松"),
-        ("head_left", 201, "缓慢左转头并回中", "只转到舒适位置，不要转动身体"),
-        ("head_right", 202, "缓慢右转头并回中", "只转到舒适位置，不要转动身体"),
-        ("head_nod", 203, "缓慢点头并回中", "完成一次点头后回到正中"),
-        ("head_cancel", 204, "快速左右摇头并回中", "幅度适中，完成后回到正中"),
-    ]
-    for block_name, code, cue_text, cue_detail in actions:
-        plan.append(
-            Step(
-                f"准备：{cue_text}",
-                f"本组共 {repetitions} 次",
-                1.0,
-                f"block_start_{block_name}",
-                20,
-                block_name,
-            )
-        )
-        for trial in range(1, repetitions + 1):
-            plan.extend(
-                [
-                    Step(
-                        "准备",
-                        f"{cue_text}，第 {trial}/{repetitions} 次",
-                        prepare_seconds,
-                        block=block_name,
-                        trial=trial,
-                    ),
-                    Step(
-                        cue_text,
-                        cue_detail,
-                        cue_seconds,
-                        block_name,
-                        code,
-                        block_name,
-                        trial,
-                    ),
-                    Step(
-                        "恢复正中并静止",
-                        "放松，等待下一次提示",
-                        recovery_seconds,
-                        block=block_name,
-                        trial=trial,
-                    ),
-                ]
-            )
-        plan.append(
-            Step(
-                f"{cue_text}组结束",
-                "保持正中姿势",
-                0.5,
-                f"block_end_{block_name}",
-                21,
-                block_name,
-            )
-        )
-
-    plan.extend(
-        [
-            Step("结束睁眼静息", "注视屏幕中央，保持头部不动", rest_seconds, "rest_open_final_start", 100),
-            Step("结束静息完成", "继续保持不动", 0.5, "rest_open_final_end", 101),
-            Step("实验完成", "请等待数据文件保存完成", 1.0, "experiment_end", 11),
-        ]
-    )
-    return plan
+OBJECT_ASSETS = {
+    "水杯": "cup.png",
+    "手机": "mobilephone.png",
+    "药瓶": "medicinebottle.png",
+}
+AUDIO_PATTERNS = {
+    "start": ((880, 130),),
+    "ending_soon": ((740, 100), (0, 90), (740, 100)),
+    "open_eyes": ((880, 120), (0, 80), (1047, 180)),
+    "complete": ((784, 120), (0, 70), (988, 120), (0, 70), (1175, 220)),
+}
 
 
 def validate_identifier(value: str, field_name: str) -> str:
@@ -133,6 +67,26 @@ def validate_identifier(value: str, field_name: str) -> str:
 
 def build_xdf_filename(participant: str, session: str, task: str, run: str) -> str:
     return f"sub-{participant}_ses-{session}_task-{task}_run-{run}.xdf".lower()
+
+
+def play_windows_audio_cue(cue: str) -> bool:
+    if sys.platform != "win32" or cue not in AUDIO_PATTERNS:
+        return False
+
+    def play() -> None:
+        import winsound
+
+        for frequency, duration_ms in AUDIO_PATTERNS[cue]:
+            if frequency == 0:
+                time.sleep(duration_ms / 1000)
+            else:
+                try:
+                    winsound.Beep(frequency, duration_ms)
+                except RuntimeError:
+                    winsound.MessageBeep()
+
+    threading.Thread(target=play, daemon=True).start()
+    return True
 
 
 class LabRecorderClient:
@@ -160,16 +114,27 @@ class LabRecorderClient:
             finally:
                 self.sock = None
 
-    def command(self, command: str) -> str:
+    def command(self, command: str, response_timeout: float | None = None) -> str:
         self.connect()
         assert self.sock is not None
-        self.sock.sendall((command + "\n").encode("utf-8"))
-        response = b""
-        while len(response) < 2:
-            chunk = self.sock.recv(2 - len(response))
-            if not chunk:
-                raise ConnectionError(f"LabRecorder 在响应命令 {command!r} 前断开连接")
-            response += chunk
+        previous_timeout = self.sock.gettimeout()
+        if response_timeout is not None:
+            self.sock.settimeout(response_timeout)
+        try:
+            self.sock.sendall((command + "\n").encode("utf-8"))
+            response = b""
+            while len(response) < 2:
+                chunk = self.sock.recv(2 - len(response))
+                if not chunk:
+                    raise ConnectionError(f"LabRecorder 在响应命令 {command!r} 前断开连接")
+                response += chunk
+        except socket.timeout as error:
+            timeout = response_timeout if response_timeout is not None else self.timeout
+            self._record_diagnostic("rcs_timeout", command=command, timeout_seconds=timeout)
+            raise TimeoutError(f"等待 LabRecorder 响应 {command!r} 超时（{timeout:.0f} 秒）") from error
+        finally:
+            if response_timeout is not None:
+                self.sock.settimeout(previous_timeout)
         decoded = response.decode("ascii", errors="replace")
         self._record_diagnostic("rcs_command", command=command, response=decoded)
         if decoded != "OK":
@@ -223,7 +188,7 @@ class LabRecorderClient:
 
     def stop_recording(self, target_path: Path | None = None) -> int | None:
         try:
-            self.command("stop")
+            self.command("stop", response_timeout=LABRECORDER_STOP_TIMEOUT)
         finally:
             self.close()
         if target_path is None:
@@ -243,30 +208,78 @@ class BSenseExperimentApp:
     def __init__(self, root: Tk, default_short: bool = False) -> None:
         self.root = root
         self.root.title("BSense-R 实验控制")
-        self.root.geometry("920x640")
-        self.root.minsize(820, 560)
+        self.root.geometry("1040x790")
+        self.root.minsize(900, 700)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<Escape>", lambda _event: self.abort_experiment())
+        self.root.bind("<KeyPress-space>", self._on_response_key)
 
         self.participant = StringVar(value="pilot01")
+        self.participant_name = StringVar(value="")
+        self.participant_age = StringVar(value="")
+        self.participant_sex = StringVar(value="")
+        self.education_years = StringVar(value="")
+        self.dominant_hand = StringVar(value="右")
         self.session = StringVar(value="01")
         self.run = StringVar(value="001")
-        self.task = StringVar(value="deviceqc")
         self.output_root = StringVar(value=r"C:\BCI\data\bsense")
         self.rcs_host = StringVar(value=DEFAULT_RCS_HOST)
         self.rcs_port = StringVar(value=str(DEFAULT_RCS_PORT))
         self.short_protocol = BooleanVar(value=default_short)
+        self.older_adult = BooleanVar(value=False)
         self.auto_labrecorder = BooleanVar(value=True)
+        self.audio_enabled = BooleanVar(value=True)
+        self.target_object = StringVar(value="水杯")
+        self.nback_order = StringVar(value="由易到难（原方案）")
+        self.consent_confirmed = BooleanVar(value=False)
+        self.operator_ready = BooleanVar(value=False)
+        self.streams_ready = BooleanVar(value=False)
+        self.recorder_ready = BooleanVar(value=False)
+        self.practice_ready = BooleanVar(value=False)
         self.status = StringVar(value="LSL Marker 流已发布，等待开始")
+        self.estimate_text = StringVar(value="")
+        self.selection_warning = StringVar(value="")
+        self.setup_error = StringVar(value="")
+        self.stream_check_status = StringVar(value="尚未自动扫描 LSL 数据流")
+        self.module_vars = {
+            protocol.task: BooleanVar(value=(protocol.task == ("deviceqc" if default_short else "m0_baseline")))
+            for protocol in PROTOCOLS
+        }
+        for variable in (
+            self.participant,
+            self.participant_name,
+            self.participant_age,
+            self.participant_sex,
+            self.education_years,
+            self.dominant_hand,
+            self.session,
+        ):
+            variable.trace_add("write", self._participant_form_changed)
+        for variable in (self.output_root, self.rcs_host, self.rcs_port, self.auto_labrecorder):
+            variable.trace_add("write", self._recorder_config_changed)
 
         self.marker_outlet = self._create_marker_outlet()
         self.active = False
+        self.stopping = False
         self.plan: list[Step] = []
         self.step_index = -1
         self.step_started = 0.0
         self.tick_id: str | None = None
         self.log_handle = None
-        self.current_context: dict[str, str] = {}
+        self.event_log_path: Path | None = None
+        self.current_context: dict[str, object] = {}
+        self.base_context: dict[str, str] = {}
+        self.output_directory = Path()
+        self.module_queue: list[str] = []
+        self.module_index = -1
+        self.current_task = ""
+        self.current_response_time: float | None = None
+        self.block_results: dict[str, list[bool]] = {}
+        self.form_variables: dict[str, StringVar] = {}
+        self.form_error = StringVar(value="")
+        self.object_images: dict[str, PhotoImage] = {}
+        self.audio_warning_played = False
+        self.pending_next_task: str | None = None
         self.labrecorder_started = False
         self.xdf_path: Path | None = None
         self.xdf_initial_size = 0
@@ -278,6 +291,12 @@ class BSenseExperimentApp:
         self._build_setup_view()
         self._build_task_view()
         self.task_frame.pack_forget()
+
+    def _participant_form_changed(self, *_args: object) -> None:
+        self.consent_confirmed.set(False)
+
+    def _recorder_config_changed(self, *_args: object) -> None:
+        self.recorder_ready.set(False)
 
     @staticmethod
     def _create_marker_outlet() -> StreamOutlet:
@@ -299,58 +318,254 @@ class BSenseExperimentApp:
         return StreamOutlet(info)
 
     def _build_setup_view(self) -> None:
-        self.setup_frame = ttk.Frame(self.root, padding=28)
+        self.setup_frame = ttk.Frame(self.root, padding=22)
         self.setup_frame.pack(fill="both", expand=True)
 
-        ttk.Label(self.setup_frame, text="BSense-R 设备验证实验", font=("Microsoft YaHei UI", 22, "bold")).grid(
+        ttk.Label(self.setup_frame, text="BSense-R 模块化数据采集", font=("Microsoft YaHei UI", 22, "bold")).grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
         )
         ttk.Label(
             self.setup_frame,
-            text="自动发布精确 LSL Marker，并通过 RCS 控制官方 LabRecorder。",
+            text="模块可独立运行或按顺序衔接；每个模块保存为独立 XDF，并在进入下一模块前确认。",
             font=("Microsoft YaHei UI", 11),
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 24))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 12))
 
-        fields = [
-            ("被试编号", self.participant),
-            ("会话编号", self.session),
-            ("Run 编号", self.run),
-            ("任务名称", self.task),
+        self.setup_notebook = ttk.Notebook(self.setup_frame)
+        self.setup_notebook.grid(row=2, column=0, columnspan=4, sticky="nsew")
+        subject_tab = ttk.Frame(self.setup_notebook, padding=16)
+        module_tab = ttk.Frame(self.setup_notebook, padding=16)
+        recorder_tab = ttk.Frame(self.setup_notebook, padding=16)
+        self.setup_notebook.add(subject_tab, text="1. 被试与会话")
+        self.setup_notebook.add(module_tab, text="2. 实验模块")
+        self.setup_notebook.add(recorder_tab, text="3. 录制检查")
+
+        subject_fields = (
+            ("匿名被试编号 *", self.participant),
+            ("真实姓名（可选）", self.participant_name),
+            ("年龄 *", self.participant_age),
+            ("性别 *", self.participant_sex),
+            ("受教育年限", self.education_years),
+            ("惯用手 *", self.dominant_hand),
+            ("会话编号 *", self.session),
+            ("Run 编号 *", self.run),
+        )
+        for index, (label, variable) in enumerate(subject_fields):
+            row = index // 2
+            column = (index % 2) * 2
+            ttk.Label(subject_tab, text=label).grid(row=row, column=column, sticky="w", pady=7)
+            if variable is self.participant_sex:
+                field = ttk.Combobox(subject_tab, textvariable=variable, values=SEX_OPTIONS, state="readonly")
+            elif variable is self.dominant_hand:
+                field = ttk.Combobox(subject_tab, textvariable=variable, values=HAND_OPTIONS, state="readonly")
+            else:
+                field = ttk.Entry(subject_tab, textvariable=variable)
+            field.grid(row=row, column=column + 1, sticky="ew", padx=(10, 24 if column == 0 else 0), pady=7)
+        ttk.Checkbutton(
+            subject_tab,
+            text="已获得被试知情同意，并确认资料录入准确 *",
+            variable=self.consent_confirmed,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(14, 6))
+        ttk.Label(
+            subject_tab,
+            text="姓名只写入 participants 下的本地受限资料，不进入 XDF、文件名或逐条 Marker。",
+            foreground="#7a4b00",
+        ).grid(row=5, column=0, columnspan=4, sticky="w")
+        subject_tab.columnconfigure(1, weight=1)
+        subject_tab.columnconfigure(3, weight=1)
+
+        module_frame = ttk.LabelFrame(module_tab, text="实验模块（可多选，按下列顺序执行）", padding=12)
+        module_frame.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 12))
+        for index, protocol in enumerate(PROTOCOLS):
+            row = index // 2
+            column = index % 2
+            checkbutton = ttk.Checkbutton(
+                module_frame,
+                text=f"{protocol.title} [{protocol.priority}]  {protocol.description}",
+                variable=self.module_vars[protocol.task],
+                command=self._module_selection_changed,
+            )
+            checkbutton.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=5)
+        module_frame.columnconfigure(0, weight=1)
+        module_frame.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(
+            module_tab,
+            text="短流程（仅用于流程联调，不作为正式训练数据）",
+            variable=self.short_protocol,
+            command=self._update_estimate,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=6)
+        ttk.Checkbutton(
+            module_tab,
+            text="老年被试节奏（M1 想象 5 秒、休息 4 秒、组间休息 5 分钟）",
+            variable=self.older_adult,
+            command=self._update_estimate,
+        ).grid(row=1, column=2, columnspan=2, sticky="w", pady=6)
+        ttk.Label(module_tab, text="M4B 目标物体").grid(row=2, column=0, sticky="w", pady=6)
+        target_combobox = ttk.Combobox(
+            module_tab,
+            textvariable=self.target_object,
+            values=("水杯", "药瓶", "手机"),
+            state="readonly",
+            width=12,
+        )
+        target_combobox.grid(row=2, column=1, sticky="w", pady=6)
+        target_combobox.bind("<<ComboboxSelected>>", self._practice_config_changed)
+        ttk.Label(module_tab, text="正式研究应在被试之间平衡三种目标", foreground="#7a4b00").grid(
+            row=2,
+            column=2,
+            columnspan=2,
+            sticky="w",
+            pady=6,
+        )
+        ttk.Label(module_tab, text="M2 负荷顺序").grid(row=3, column=0, sticky="w", pady=6)
+        nback_combobox = ttk.Combobox(
+            module_tab,
+            textvariable=self.nback_order,
+            values=("由易到难（原方案）", "拉丁方平衡（需先练习）"),
+            state="readonly",
+            width=24,
+        )
+        nback_combobox.grid(row=3, column=1, sticky="w", pady=6)
+        nback_combobox.bind("<<ComboboxSelected>>", self._practice_config_changed)
+        ttk.Label(module_tab, text="拉丁方模式开始前必须完成 0/1/2-back 练习", foreground="#7a4b00").grid(
+            row=3,
+            column=2,
+            columnspan=2,
+            sticky="w",
+            pady=6,
+        )
+        module_tab.columnconfigure(0, weight=1)
+        module_tab.columnconfigure(1, weight=1)
+        module_tab.columnconfigure(2, weight=1)
+        module_tab.columnconfigure(3, weight=1)
+
+        recorder_fields = (
             ("数据目录", self.output_root),
             ("RCS 主机", self.rcs_host),
             ("RCS 端口", self.rcs_port),
-        ]
-        for row, (label, variable) in enumerate(fields, start=2):
-            ttk.Label(self.setup_frame, text=label).grid(row=row, column=0, sticky="w", pady=7)
-            entry = ttk.Entry(self.setup_frame, textvariable=variable)
-            entry.grid(row=row, column=1, columnspan=3, sticky="ew", padx=(14, 0), pady=7)
-
+        )
+        for row, (label, variable) in enumerate(recorder_fields):
+            ttk.Label(recorder_tab, text=label).grid(row=row, column=0, sticky="w", pady=7)
+            ttk.Entry(recorder_tab, textvariable=variable).grid(
+                row=row,
+                column=1,
+                columnspan=3,
+                sticky="ew",
+                padx=(10, 0),
+                pady=7,
+            )
         ttk.Checkbutton(
-            self.setup_frame,
-            text="短流程（约 1 分钟，用于首次联调）",
-            variable=self.short_protocol,
-        ).grid(row=9, column=0, columnspan=4, sticky="w", pady=(18, 6))
-        ttk.Checkbutton(
-            self.setup_frame,
+            recorder_tab,
             text="自动控制 LabRecorder（需勾选 Enable RCS，端口 22345）",
             variable=self.auto_labrecorder,
-        ).grid(row=10, column=0, columnspan=4, sticky="w", pady=6)
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 5))
+        ttk.Checkbutton(
+            recorder_tab,
+            text="启用 Windows 扬声器过渡提示音",
+            variable=self.audio_enabled,
+        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(12, 5))
+        checks = (
+            ("操作员在场且被试坐姿安全", self.operator_ready),
+            ("BioMultiLite 已连接且 7 类 LSL 流已启动", self.streams_ready),
+            ("LabRecorder 已打开并已完成 RCS/手动模式准备", self.recorder_ready),
+            ("已完成所选正式任务的指导与必要练习", self.practice_ready),
+        )
+        for row, (label, variable) in enumerate(checks, start=4):
+            ttk.Checkbutton(recorder_tab, text=label, variable=variable).grid(
+                row=row,
+                column=0,
+                columnspan=4,
+                sticky="w",
+                pady=4,
+            )
+        self.scan_streams_button = ttk.Button(recorder_tab, text="自动扫描 LSL 数据流", command=self.check_lsl_streams)
+        self.scan_streams_button.grid(
+            row=8,
+            column=0,
+            sticky="w",
+            pady=(12, 4),
+        )
+        ttk.Label(recorder_tab, textvariable=self.stream_check_status, wraplength=760).grid(
+            row=8,
+            column=1,
+            columnspan=3,
+            sticky="w",
+            padx=(12, 0),
+            pady=(12, 4),
+        )
+        ttk.Button(recorder_tab, text="试听过渡提示音", command=self.test_audio_cue).grid(
+            row=9,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
+        )
+        ttk.Label(recorder_tab, text="正式采集时仅在过渡边界播放，并同步写入 Marker。", foreground="#7a4b00").grid(
+            row=9,
+            column=1,
+            columnspan=3,
+            sticky="w",
+            padx=(12, 0),
+            pady=(8, 0),
+        )
+        recorder_tab.columnconfigure(1, weight=1)
+        recorder_tab.columnconfigure(3, weight=1)
 
-        ttk.Separator(self.setup_frame).grid(row=11, column=0, columnspan=4, sticky="ew", pady=20)
-        ttk.Label(self.setup_frame, textvariable=self.status).grid(row=12, column=0, columnspan=4, sticky="w")
+        ttk.Label(self.setup_frame, textvariable=self.estimate_text).grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 2))
+        ttk.Label(self.setup_frame, textvariable=self.selection_warning, foreground="#9a5a00").grid(
+            row=4,
+            column=0,
+            columnspan=4,
+            sticky="w",
+        )
+        ttk.Label(self.setup_frame, textvariable=self.setup_error, foreground="#b00020", wraplength=960).grid(
+            row=5,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(3, 0),
+        )
+        ttk.Separator(self.setup_frame).grid(row=6, column=0, columnspan=4, sticky="ew", pady=8)
+        ttk.Label(self.setup_frame, textvariable=self.status).grid(row=7, column=0, columnspan=4, sticky="w")
 
         ttk.Button(self.setup_frame, text="发送测试 Marker", command=self.send_test_marker).grid(
-            row=13, column=0, sticky="w", pady=(22, 0)
+            row=8, column=0, sticky="w", pady=(12, 0)
         )
         ttk.Button(self.setup_frame, text="打开实时监测", command=self.open_live_monitor).grid(
-            row=13, column=1, sticky="w", padx=(14, 0), pady=(22, 0)
+            row=8, column=1, sticky="w", pady=(12, 0)
         )
-        ttk.Button(self.setup_frame, text="开始实验", command=self.start_experiment).grid(
-            row=13, column=3, sticky="e", pady=(22, 0)
+        ttk.Button(self.setup_frame, text="开始所选模块", command=self.start_experiment).grid(
+            row=8, column=3, sticky="e", pady=(12, 0)
         )
 
         self.setup_frame.columnconfigure(1, weight=1)
-        self.setup_frame.columnconfigure(2, weight=1)
+        self.setup_frame.columnconfigure(3, weight=1)
+        self.setup_frame.rowconfigure(2, weight=1)
+        self._update_estimate()
+
+    def _selected_modules(self) -> list[str]:
+        return [protocol.task for protocol in PROTOCOLS if self.module_vars[protocol.task].get()]
+
+    def _module_selection_changed(self) -> None:
+        self.practice_ready.set(False)
+        self._update_estimate()
+
+    def _practice_config_changed(self, _event: object) -> None:
+        self.practice_ready.set(False)
+
+    def _update_estimate(self) -> None:
+        selected = self._selected_modules()
+        seconds = sum(
+            estimate_protocol_seconds(
+                task,
+                short=self.short_protocol.get(),
+                older_adult=self.older_adult.get(),
+            )
+            for task in selected
+        )
+        manual_note = "（另含人工确认/问卷时间）" if any(task in {"m0_baseline", "m2_nback", "m3a_safety", "m3b_fatigue"} for task in selected) else ""
+        self.estimate_text.set(f"已选 {len(selected)} 个模块，自动计时约 {seconds / 60:.1f} 分钟{manual_note}")
+        missing_baseline = "m0_baseline" not in selected and any(task.startswith("m") for task in selected)
+        self.selection_warning.set("提示：未选择 M0，本会话正式任务将缺少个体基线。" if missing_baseline else "")
 
     def open_live_monitor(self) -> None:
         monitor = self.live_monitor
@@ -362,62 +577,306 @@ class BSenseExperimentApp:
 
         self.live_monitor = LiveMonitorWindow(Toplevel(self.root))
 
+    def check_lsl_streams(self) -> None:
+        self.scan_streams_button.configure(state="disabled")
+        self.stream_check_status.set("正在扫描，请保持 BioMultiLite LSL 为 Start 状态……")
+
+        def scan() -> None:
+            error: Exception | None = None
+            found: set[str] = set()
+            try:
+                from pylsl import resolve_streams
+
+                for info in resolve_streams(2.0):
+                    descriptor = describe_stream(info)
+                    if descriptor is not None:
+                        found.add(descriptor.kind)
+            except Exception as caught:  # noqa: BLE001 - reported inline on the setup page
+                error = caught
+            self.root.after(0, lambda: self._lsl_scan_finished(found, error))
+
+        threading.Thread(target=scan, daemon=True).start()
+
+    def test_audio_cue(self) -> None:
+        if sys.platform != "win32":
+            self.stream_check_status.set("提示音仅在 Windows 正式环境中播放。")
+            return
+        if not self.audio_enabled.get():
+            self.stream_check_status.set("请先勾选“启用 Windows 扬声器过渡提示音”。")
+            return
+        play_windows_audio_cue("open_eyes")
+        self.stream_check_status.set("已播放试听音；请确认音量舒适且被试能够听见。")
+
+    def _lsl_scan_finished(self, found: set[str], error: Exception | None) -> None:
+        self.scan_streams_button.configure(state="normal")
+        if error is not None:
+            self.streams_ready.set(False)
+            self.stream_check_status.set(f"扫描失败：{error}")
+            return
+        missing = [kind for kind in SUPPORTED_STREAM_KINDS if kind not in found]
+        found_labels = "、".join(STREAM_KIND_LABELS[kind] for kind in SUPPORTED_STREAM_KINDS if kind in found)
+        if missing:
+            missing_labels = "、".join(STREAM_KIND_LABELS[kind] for kind in missing)
+            self.streams_ready.set(False)
+            self.stream_check_status.set(f"已发现：{found_labels or '无'}；缺少：{missing_labels}")
+            return
+        self.streams_ready.set(True)
+        self.stream_check_status.set(f"六类数值流已就绪：{found_labels}。BioMultiLite Marker 请在 LabRecorder 中确认。")
+
     def _build_task_view(self) -> None:
-        self.task_frame = ttk.Frame(self.root, padding=32)
-        self.progress_label = ttk.Label(self.task_frame, text="", font=("Microsoft YaHei UI", 12))
+        self.task_frame = ttk.Frame(self.root, padding=28)
+        self.progress_label = ttk.Label(self.task_frame, text="", font=("Microsoft YaHei UI", 14))
         self.progress_label.pack(anchor="nw")
-        ttk.Separator(self.task_frame).pack(fill="x", pady=18)
+        ttk.Separator(self.task_frame).pack(fill="x", pady=12)
 
+        self.task_content = ttk.Frame(self.task_frame)
+        self.task_content.pack(fill="both", expand=True)
+        self.image_label = ttk.Label(self.task_content, anchor="center")
+        self.image_label.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.image_label.grid_remove()
         self.cue_label = ttk.Label(
-            self.task_frame,
+            self.task_content,
             text="",
             anchor="center",
             justify="center",
-            font=("Microsoft YaHei UI", 34, "bold"),
+            font=("Microsoft YaHei UI", 54, "bold"),
+            wraplength=1100,
         )
-        self.cue_label.pack(fill="both", expand=True)
+        self.cue_label.grid(row=1, column=0, sticky="nsew", pady=4)
         self.detail_label = ttk.Label(
-            self.task_frame,
+            self.task_content,
             text="",
             anchor="center",
             justify="center",
-            font=("Microsoft YaHei UI", 16),
+            font=("Microsoft YaHei UI", 22),
+            wraplength=1050,
         )
-        self.detail_label.pack(fill="x", pady=12)
+        self.detail_label.grid(row=2, column=0, sticky="ew", pady=8)
+        self.form_frame = ttk.LabelFrame(self.task_content, text="请填写", padding=18)
+        self.form_frame.grid(row=3, column=0, sticky="ew", padx=100, pady=8)
+        self.form_frame.grid_remove()
         self.countdown_label = ttk.Label(
-            self.task_frame,
+            self.task_content,
             text="",
             anchor="center",
-            font=("Microsoft YaHei UI", 26),
+            font=("Microsoft YaHei UI", 36, "bold"),
         )
-        self.countdown_label.pack(fill="x", pady=12)
-        ttk.Button(self.task_frame, text="中止实验 (Esc)", command=self.abort_experiment).pack(pady=(18, 0))
+        self.countdown_label.grid(row=4, column=0, sticky="ew", pady=8)
+        self.task_content.columnconfigure(0, weight=1)
+        self.task_content.rowconfigure(1, weight=1)
 
-    def _collect_context(self) -> tuple[dict[str, str], Path, str]:
+        self.quality_frame = ttk.Frame(self.task_frame)
+        self.quality_frame.pack(fill="x", pady=(4, 0))
+        for label, event, code in (
+            ("标记试次无效", "trial_invalid", 900),
+            ("记录设备调整", "device_adjustment", 901),
+            ("记录信号中断", "bluetooth_interruption", 902),
+        ):
+            ttk.Button(
+                self.quality_frame,
+                text=label,
+                takefocus=False,
+                command=lambda event=event, code=code: self._send_quality_marker(event, code),
+            ).pack(side="left", padx=(0, 10))
+        self.quality_frame.pack_forget()
+
+        self.button_frame = ttk.Frame(self.task_frame)
+        self.button_frame.pack(fill="x", pady=(10, 0))
+        self.action_button = ttk.Button(self.button_frame, text="继续", command=self._complete_manual_step)
+        self.action_button.pack(side="left")
+        self.action_button.pack_forget()
+        self.secondary_button = ttk.Button(self.button_frame, text="返回首页", command=self._return_to_setup)
+        self.secondary_button.pack(side="left", padx=(12, 0))
+        self.secondary_button.pack_forget()
+        self.abort_button = ttk.Button(self.button_frame, text="中止实验 (Esc)", command=self.abort_experiment)
+        self.abort_button.pack(side="right")
+        self._load_object_images()
+
+    def _load_object_images(self) -> None:
+        asset_root = Path(__file__).resolve().parents[2] / "assets"
+        for object_name, filename in OBJECT_ASSETS.items():
+            try:
+                image = PhotoImage(file=str(asset_root / filename))
+                factor = max(1, (max(image.width(), image.height()) + 419) // 420)
+                self.object_images[object_name] = image.subsample(factor, factor)
+            except Exception:  # noqa: BLE001 - missing visuals fall back to large text cues
+                continue
+
+    @staticmethod
+    def _cue_font_size(text: str, has_image: bool) -> int:
+        if has_image:
+            return 44
+        if len(text) <= 3:
+            return 108
+        if len(text) <= 10:
+            return 64
+        return 48
+
+    def _display_visual(self, visual: str | None) -> bool:
+        image = self.object_images.get(visual or "")
+        if image is None:
+            self.image_label.configure(image="")
+            self.image_label.grid_remove()
+            return False
+        self.image_label.configure(image=image)
+        self.image_label.grid()
+        return True
+
+    def _hide_inline_form(self) -> None:
+        self.form_frame.grid_remove()
+        self.form_variables = {}
+        self.form_error.set("")
+
+    def _show_inline_form(self, step: Step) -> None:
+        for child in self.form_frame.winfo_children():
+            child.destroy()
+        self.form_variables = {}
+        self.form_error.set("")
+        for row, field in enumerate(step.fields):
+            ttk.Label(self.form_frame, text=field.label, font=("Microsoft YaHei UI", 16)).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 18),
+                pady=7,
+            )
+            variable = StringVar(value="")
+            self.form_variables[field.key] = variable
+            if field.kind == "rating":
+                values = tuple(str(value) for value in range(field.minimum or 1, (field.maximum or 10) + 1))
+            elif field.kind == "boolean":
+                values = ("否", "是")
+            else:
+                values = field.choices
+            ttk.Combobox(
+                self.form_frame,
+                textvariable=variable,
+                values=values,
+                state="readonly",
+                font=("Microsoft YaHei UI", 15),
+            ).grid(row=row, column=1, sticky="ew", pady=7)
+        ttk.Label(self.form_frame, textvariable=self.form_error, foreground="#b00020").grid(
+            row=len(step.fields),
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(6, 0),
+        )
+        self.form_frame.columnconfigure(1, weight=1)
+        self.form_frame.grid()
+
+    def _read_inline_form(self, fields: tuple[InputField, ...]) -> dict[str, object] | None:
+        responses: dict[str, object] = {}
+        for field in fields:
+            value = self.form_variables[field.key].get()
+            if not value:
+                self.form_error.set(f"请填写：{field.label}")
+                return None
+            if field.kind == "rating":
+                responses[field.key] = int(value)
+            elif field.kind == "boolean":
+                responses[field.key] = value == "是"
+            else:
+                responses[field.key] = value
+        self.form_error.set("")
+        return responses
+
+    def _show_task_action(
+        self,
+        title: str,
+        detail: str,
+        primary_text: str,
+        primary_command: Callable[[], None],
+        *,
+        secondary_text: str | None = None,
+        secondary_command: Callable[[], None] | None = None,
+        allow_abort: bool = False,
+    ) -> None:
+        self._hide_inline_form()
+        self._display_visual(None)
+        self.cue_label.configure(text=title, font=("Microsoft YaHei UI", 48, "bold"))
+        self.detail_label.configure(text=detail)
+        self.countdown_label.configure(text="")
+        self.action_button.configure(text=primary_text, command=primary_command)
+        self.action_button.pack(side="left")
+        if secondary_text is not None and secondary_command is not None:
+            self.secondary_button.configure(text=secondary_text, command=secondary_command)
+            self.secondary_button.pack(side="left", padx=(12, 0))
+        else:
+            self.secondary_button.pack_forget()
+        if allow_abort:
+            self.abort_button.pack(side="right")
+        else:
+            self.abort_button.pack_forget()
+        self.quality_frame.pack_forget()
+
+    def _send_quality_marker(self, event: str, code: int) -> None:
+        if not self.active or self.stopping:
+            return
+        step = self.plan[self.step_index] if 0 <= self.step_index < len(self.plan) else None
+        payload = {
+            "code": code,
+            "event": event,
+            "block": step.block if step is not None else None,
+            "trial": step.trial if step is not None else None,
+            **self.current_context,
+            "app_version": APP_VERSION,
+            "unix_time": time.time(),
+        }
+        self._push_marker(payload)
+        self.progress_label.configure(text=f"已记录：{event}  |  步骤 {self.step_index + 1}/{len(self.plan)}")
+        self.task_frame.focus_set()
+
+    def _collect_base_context(self) -> tuple[dict[str, str], Path]:
         participant = validate_identifier(self.participant.get(), "被试编号")
         session = validate_identifier(self.session.get(), "会话编号")
         run = validate_identifier(self.run.get(), "Run 编号")
-        task = validate_identifier(self.task.get(), "任务名称")
-        output_root = Path(self.output_root.get().strip())
-        if not str(output_root):
+        output_text = self.output_root.get().strip()
+        if not output_text:
             raise ValueError("数据目录不能为空")
-        filename = build_xdf_filename(participant, session, task, run)
-        return (
-            {"participant": participant, "session": session, "run": run, "task": task},
-            output_root,
-            filename,
+        return {"participant": participant, "session": session, "run": run}, Path(output_text)
+
+    def _collect_participant_profile(self) -> dict[str, object]:
+        return validate_participant_profile(
+            name=self.participant_name.get(),
+            age=self.participant_age.get(),
+            sex=self.participant_sex.get(),
+            education_years=self.education_years.get(),
+            dominant_hand=self.dominant_hand.get(),
         )
+
+    def _show_setup_error(self, message: str, tab_index: int) -> None:
+        self.setup_error.set(message)
+        self.setup_notebook.select(tab_index)
+
+    @staticmethod
+    def _paths_for_task(context: dict[str, str], output_root: Path, task: str) -> tuple[str, Path, Path, Path]:
+        filename = build_xdf_filename(context["participant"], context["session"], task, context["run"])
+        log_dir = output_root / "logs"
+        return (
+            filename,
+            output_root.resolve() / filename,
+            log_dir / filename.replace(".xdf", "_events.jsonl"),
+            log_dir / filename.replace(".xdf", "_recorder.jsonl"),
+        )
+
+    @staticmethod
+    def _protocol_seed(context: dict[str, str], task: str) -> int:
+        seed_text = ":".join((context["participant"], context["session"], context["run"], task))
+        return int.from_bytes(hashlib.sha256(seed_text.encode("utf-8")).digest()[:4], "big")
 
     def send_test_marker(self) -> None:
         try:
-            context, _, _ = self._collect_context()
+            context, _ = self._collect_base_context()
         except ValueError as error:
-            messagebox.showerror("参数错误", str(error))
+            self._show_setup_error(str(error), 0)
             return
+        self.setup_error.set("")
         payload = {
             "code": 1,
             "event": "marker_test",
             **context,
+            "task": "connectiontest",
             "app_version": APP_VERSION,
             "unix_time": time.time(),
         }
@@ -427,46 +886,107 @@ class BSenseExperimentApp:
     def start_experiment(self) -> None:
         if self.active:
             return
+        self.setup_error.set("")
         try:
-            context, output_root, filename = self._collect_context()
-            port = int(self.rcs_port.get())
-            if not 1 <= port <= 65535:
-                raise ValueError("RCS 端口范围应为 1-65535")
+            context, output_root = self._collect_base_context()
+            profile = self._collect_participant_profile()
         except (ValueError, OSError) as error:
-            messagebox.showerror("参数错误", str(error))
+            self._show_setup_error(str(error), 0)
+            return
+        try:
+            port = DEFAULT_RCS_PORT
+            if self.auto_labrecorder.get():
+                port = int(self.rcs_port.get())
+                if not 1 <= port <= 65535:
+                    raise ValueError("RCS 端口范围应为 1-65535")
+        except (ValueError, OSError) as error:
+            self._show_setup_error(str(error), 2)
             return
 
-        if not messagebox.askokcancel(
-            "开始前确认",
-            "请确认：\n\n"
-            "1. 被试保持坐姿并有操作员在场\n"
-            "2. BioMultiLite 已连接，7 类 LSL 流已启动\n"
-            "3. LabRecorder 已打开并启用 RCS 22345\n"
-            "4. 当前不需要点击 BioMultiLite 本地 REC\n\n"
-            f"目标文件：{filename}",
-        ):
+        if not self.consent_confirmed.get():
+            self._show_setup_error("请确认已获得知情同意且资料录入准确。", 0)
+            return
+
+        selected = self._selected_modules()
+        if not selected:
+            self._show_setup_error("请至少选择一个实验模块。", 1)
+            return
+        if not all((self.operator_ready.get(), self.streams_ready.get(), self.recorder_ready.get())):
+            self._show_setup_error("请完成“录制检查”页的前三项开始前确认。", 2)
+            return
+        practice_tasks = {"m1_mi", "m2_nback", "m4a_intent", "m4b_target"}
+        if any(task in practice_tasks for task in selected) and not self.practice_ready.get():
+            self._show_setup_error("所选任务需要先完成指导与练习，请在“录制检查”页确认。", 2)
+            return
+
+        existing: list[Path] = []
+        for task in selected:
+            filename, target_path, log_path, recorder_log_path = self._paths_for_task(context, output_root, task)
+            existing.extend(path for path in (target_path, log_path, recorder_log_path) if path.exists())
+        if existing:
+            self._show_setup_error(
+                "目标文件已存在，请更换 Run 编号：" + "；".join(str(path) for path in existing),
+                0,
+            )
             return
 
         output_root.mkdir(parents=True, exist_ok=True)
-        log_dir = output_root / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / filename.replace(".xdf", "_events.jsonl")
-        recorder_log_path = log_dir / filename.replace(".xdf", "_recorder.jsonl")
-        target_path = output_root.resolve() / filename
-        existing = [path for path in (target_path, log_path, recorder_log_path) if path.exists()]
-        if existing:
-            messagebox.showerror(
-                "目标文件已存在",
-                "请更换被试或 Run 编号，程序不会覆盖已有数据：\n\n" + "\n".join(str(path) for path in existing),
+        (output_root / "logs").mkdir(parents=True, exist_ok=True)
+        try:
+            profile_path, profile_created = save_participant_profile(
+                output_root,
+                context["participant"],
+                context["session"],
+                profile,
+                APP_VERSION,
             )
+        except ValueError as error:
+            self._show_setup_error(str(error), 0)
             return
-        self.log_handle = log_path.open("w", encoding="utf-8")
+        profile_status = "已创建" if profile_created else "已核对"
+        self.status.set(f"被试资料{profile_status}：{profile_path.name}；正在启动录制")
+        self.base_context = context
+        self.output_directory = output_root
+        self.module_queue = selected
+        self.module_index = 0
+        self._begin_current_module(port)
+
+    def _begin_current_module(self, port: int | None = None) -> None:
+        task = self.module_queue[self.module_index]
+        filename, target_path, log_path, recorder_log_path = self._paths_for_task(
+            self.base_context,
+            self.output_directory,
+            task,
+        )
+        seed = self._protocol_seed(self.base_context, task)
+        self.event_log_path = log_path
         self.recorder_log_path = recorder_log_path
         self.xdf_path = target_path
-        self.current_context = context
-        self.plan = build_deviceqc_plan(self.short_protocol.get())
+        self.current_task = task
+        self.current_context = {
+            **self.base_context,
+            "task": task,
+            "protocol_seed": seed,
+            "module_index": self.module_index + 1,
+            "module_count": len(self.module_queue),
+        }
+        nback_order = "counterbalanced" if self.nback_order.get().startswith("拉丁方") else "ascending"
+        if task == "m2_nback":
+            self.current_context["nback_order"] = nback_order
+        self.plan = build_protocol_plan(
+            task,
+            short=self.short_protocol.get(),
+            older_adult=self.older_adult.get(),
+            seed=seed,
+            target_object=self.target_object.get(),
+            nback_order=nback_order,
+        )
         self.step_index = -1
         self.active = True
+        self.stopping = False
+        self.current_response_time = None
+        self.block_results = {}
+        self.pending_next_task = None
         self.labrecorder_started = False
         self.xdf_initial_size = 0
         self.xdf_current_size = 0
@@ -476,16 +996,27 @@ class BSenseExperimentApp:
         self.task_frame.pack(fill="both", expand=True)
         self.root.attributes("-fullscreen", True)
         self.cue_label.configure(text="正在准备录制")
-        self.detail_label.configure(text="请观察 LabRecorder 是否开始计时且文件大小增长")
+        self.detail_label.configure(
+            text=f"{PROTOCOL_BY_TASK[task].title}（{self.module_index + 1}/{len(self.module_queue)}）\n"
+            "请观察 LabRecorder 是否开始计时且文件大小增长"
+        )
         self.countdown_label.configure(text="")
         self.progress_label.configure(text=f"输出文件：{filename}")
+        self._hide_inline_form()
+        self._display_visual(None)
+        self.quality_frame.pack_forget()
+        self.action_button.pack_forget()
+        self.secondary_button.pack_forget()
+        self.abort_button.pack(side="right")
 
         if self.auto_labrecorder.get():
+            if port is None:
+                port = int(self.rcs_port.get())
             client = LabRecorderClient(self.rcs_host.get().strip(), port)
 
             def prepare() -> None:
                 try:
-                    xdf_path, initial_size = client.start_recording(output_root, filename)
+                    xdf_path, initial_size = client.start_recording(self.output_directory, filename)
                 except Exception as error:  # noqa: BLE001 - surfaced to the operator
                     if self.recorder_log_path is not None:
                         client.write_diagnostics(self.recorder_log_path)
@@ -500,17 +1031,20 @@ class BSenseExperimentApp:
             self.root.after(500, self._manual_recording_ready)
 
     def _prepare_failed(self, error: Exception) -> None:
-        if not self.active:
+        if not self.active or self.stopping:
             return
         self.status.set(f"无法控制 LabRecorder：{error}")
-        messagebox.showerror(
+        self.active = False
+        self._close_current_files()
+        self._show_task_action(
             "LabRecorder 连接失败",
-            f"{error}\n\n请确认 Enable RCS 已勾选、端口为 22345，并且 LabRecorder 未在录制。",
+            f"{error}\n\n请确认 RCS 配置、目标目录权限，并检查 LabRecorder 当前未在录制。",
+            "返回首页检查",
+            self._return_to_setup,
         )
-        self._return_to_setup()
 
     def _recording_ready(self, client: LabRecorderClient, xdf_path: Path, initial_size: int) -> None:
-        if not self.active:
+        if not self.active or self.stopping:
             try:
                 client.stop_recording(xdf_path)
             except OSError:
@@ -518,20 +1052,34 @@ class BSenseExperimentApp:
             return
         self.labrecorder_started = True
         self._labrecorder_client = client
+        assert self.event_log_path is not None
+        self.log_handle = self.event_log_path.open("x", encoding="utf-8")
         self.xdf_path = xdf_path
         self.xdf_initial_size = initial_size
         self.xdf_current_size = initial_size
         self.cue_label.configure(text="录制已启动")
         self.detail_label.configure(text=f"已验证 XDF：{initial_size / 1024:.1f} KB，实验将在 2 秒后开始")
+        self.abort_button.pack(side="right")
         self.root.after(2000, self._advance_step)
 
     def _manual_recording_ready(self) -> None:
-        if not self.active:
+        if not self.active or self.stopping:
             return
-        ready = messagebox.askokcancel("手动录制", "请在 LabRecorder 中点击 Start。确认已经开始计时后继续。")
-        if not ready:
-            self.abort_experiment()
+        self._show_task_action(
+            "请开始手动录制",
+            "在 LabRecorder 中点击 Start，确认计时已经开始后，再点击下方按钮。",
+            "已开始，验证 XDF",
+            self._confirm_manual_recording_started,
+            allow_abort=False,
+        )
+
+    def _confirm_manual_recording_started(self) -> None:
+        if not self.active or self.stopping:
             return
+        self.action_button.pack_forget()
+        self.secondary_button.pack_forget()
+        self.cue_label.configure(text="正在验证 XDF")
+        self.detail_label.configure(text="请稍候")
 
         def verify_manual() -> None:
             try:
@@ -545,16 +1093,19 @@ class BSenseExperimentApp:
         threading.Thread(target=verify_manual, daemon=True).start()
 
     def _manual_xdf_ready(self, initial_size: int) -> None:
-        if not self.active:
+        if not self.active or self.stopping:
             return
         self.xdf_initial_size = initial_size
         self.xdf_current_size = initial_size
+        assert self.event_log_path is not None
+        self.log_handle = self.event_log_path.open("x", encoding="utf-8")
         self.cue_label.configure(text="录制已启动")
         self.detail_label.configure(text=f"已验证 XDF：{initial_size / 1024:.1f} KB，实验将在 2 秒后开始")
+        self.abort_button.pack(side="right")
         self.root.after(2000, self._advance_step)
 
     def _advance_step(self) -> None:
-        if not self.active:
+        if not self.active or self.stopping:
             return
         self.step_index += 1
         if self.step_index >= len(self.plan):
@@ -563,28 +1114,152 @@ class BSenseExperimentApp:
 
         step = self.plan[self.step_index]
         self.step_started = time.monotonic()
-        self.cue_label.configure(text=step.text)
+        self.current_response_time = None
+        self.audio_warning_played = False
+        self._hide_inline_form()
+        has_image = self._display_visual(step.visual)
+        self.cue_label.configure(
+            text=step.text,
+            font=("Microsoft YaHei UI", self._cue_font_size(step.text, has_image), "bold"),
+        )
         self.detail_label.configure(text=step.detail)
         self.progress_label.configure(text=f"步骤 {self.step_index + 1}/{len(self.plan)}")
+        self.action_button.pack_forget()
+        self.secondary_button.pack_forget()
+        self.abort_button.pack(side="right")
+        self.quality_frame.pack(before=self.button_frame, fill="x", pady=(4, 0))
         if step.event is not None:
-            payload = {
-                "code": step.code,
-                "event": step.event,
+            self._push_step_marker(step.event, step.code, step)
+        if step.start_sound is not None:
+            self._play_audio_cue(step.start_sound, step, "start")
+        if step.advance == "timed":
+            self._tick_step()
+            return
+        if step.advance == "form":
+            self._show_inline_form(step)
+            self.countdown_label.configure(text="请完成表单")
+        else:
+            self.countdown_label.configure(text="等待实验员确认")
+        self.action_button.configure(
+            text="提交表单并继续" if step.advance == "form" else "已完成，继续",
+            command=self._complete_manual_step,
+        )
+        self.action_button.pack(side="left")
+
+    def _push_step_marker(
+        self,
+        event: str,
+        code: int | None,
+        step: Step,
+        **extra: object,
+    ) -> float:
+        return self._push_marker(
+            {
+                "code": code,
+                "event": event,
                 "block": step.block,
                 "trial": step.trial,
+                **step.metadata,
+                **extra,
                 **self.current_context,
                 "app_version": APP_VERSION,
                 "unix_time": time.time(),
             }
-            self._push_marker(payload)
-        self._tick_step()
+        )
+
+    def _play_audio_cue(self, cue: str, step: Step, phase: str) -> None:
+        if not self.audio_enabled.get() or sys.platform != "win32":
+            return
+        self._push_step_marker("audio_cue", 700, step, audio_cue=cue, audio_phase=phase)
+        play_windows_audio_cue(cue)
+
+    def _on_response_key(self, _event: object) -> None:
+        if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
+            return
+        step = self.plan[self.step_index]
+        if step.response_key != "space" or self.current_response_time is not None:
+            return
+        self.current_response_time = time.monotonic()
+        self._push_step_marker(
+            "nback_response",
+            459,
+            step,
+            response_key="space",
+            reaction_time_s=round(self.current_response_time - self.step_started, 6),
+        )
+
+    def _complete_manual_step(self) -> None:
+        if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
+            return
+        step = self.plan[self.step_index]
+        responses: dict[str, object] = {}
+        if step.advance == "form":
+            collected = self._read_inline_form(step.fields)
+            if collected is None:
+                return
+            responses = collected
+        if step.block is not None and step.block in self.block_results:
+            results = self.block_results[step.block]
+            correct_count = sum(results)
+            responses.update(
+                {
+                    "correct_count": correct_count,
+                    "trial_count": len(results),
+                    "accuracy": round(correct_count / len(results), 6) if results else None,
+                }
+            )
+        self.action_button.pack_forget()
+        self._complete_current_step(**responses)
+
+    def _complete_current_step(self, **completion_data: object) -> None:
+        if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
+            return
+        step = self.plan[self.step_index]
+        if step.response_key is not None:
+            responded = self.current_response_time is not None
+            is_target = bool(step.metadata.get("is_target"))
+            correct = responded == is_target
+            reaction_time = (
+                round(self.current_response_time - self.step_started, 6)
+                if self.current_response_time is not None
+                else None
+            )
+            self._push_step_marker(
+                "nback_trial_result",
+                460,
+                step,
+                responded=responded,
+                correct=correct,
+                reaction_time_s=reaction_time,
+            )
+            if step.block is not None:
+                self.block_results.setdefault(step.block, []).append(correct)
+        if step.completion_event is not None:
+            self._push_step_marker(
+                step.completion_event,
+                step.completion_code,
+                step,
+                **completion_data,
+            )
+        if step.end_sound is not None:
+            self._play_audio_cue(step.end_sound, step, "end")
+        self.root.after_idle(self._advance_step)
 
     def _tick_step(self) -> None:
-        if not self.active or self.step_index >= len(self.plan):
+        if not self.active or self.stopping or self.step_index >= len(self.plan):
             return
+        self.tick_id = None
         step = self.plan[self.step_index]
         remaining = max(0.0, step.duration - (time.monotonic() - self.step_started))
         self.countdown_label.configure(text=f"{remaining:0.1f} s")
+        if (
+            step.warning_sound is not None
+            and step.warning_at is not None
+            and remaining <= step.warning_at
+            and not self.audio_warning_played
+        ):
+            self.audio_warning_played = True
+            self._play_audio_cue(step.warning_sound, step, "warning")
         now = time.monotonic()
         if self.xdf_path is not None and now - self.last_file_poll >= 1.0:
             self.last_file_poll = now
@@ -596,7 +1271,7 @@ class BSenseExperimentApp:
                 text=f"步骤 {self.step_index + 1}/{len(self.plan)}  |  XDF {self.xdf_current_size / 1024:.1f} KB"
             )
         if remaining <= 0:
-            self._advance_step()
+            self._complete_current_step()
             return
         self.tick_id = self.root.after(100, self._tick_step)
 
@@ -613,13 +1288,37 @@ class BSenseExperimentApp:
     def _finish_experiment(self) -> None:
         if not self.active:
             return
-        self.cue_label.configure(text="正在保存数据")
-        self.detail_label.configure(text="请勿关闭 LabRecorder")
-        self.countdown_label.configure(text="")
+        if not self.auto_labrecorder.get():
+            self._show_task_action(
+                "请停止手动录制",
+                "在 LabRecorder 中点击 Stop，确认文件已保存后，再点击下方按钮。",
+                "已停止，验证 XDF",
+                self._confirm_manual_recording_stopped,
+                allow_abort=False,
+            )
+            return
+        self._show_saving_state()
         self.root.after(1000, lambda: self._stop_and_return(aborted=False))
 
+    def _confirm_manual_recording_stopped(self) -> None:
+        if not self.active or self.stopping:
+            return
+        self._show_saving_state()
+        self.root.after(500, lambda: self._stop_and_return(aborted=False))
+
+    def _show_saving_state(self) -> None:
+        self._hide_inline_form()
+        self._display_visual(None)
+        self.action_button.pack_forget()
+        self.secondary_button.pack_forget()
+        self.abort_button.pack_forget()
+        self.quality_frame.pack_forget()
+        self.cue_label.configure(text="正在保存数据", font=("Microsoft YaHei UI", 48, "bold"))
+        self.detail_label.configure(text="请勿关闭 LabRecorder")
+        self.countdown_label.configure(text="")
+
     def abort_experiment(self) -> None:
-        if not self.active:
+        if not self.active or self.stopping:
             return
         if not messagebox.askyesno("中止实验", "确认中止当前实验并停止 LabRecorder？"):
             return
@@ -632,9 +1331,21 @@ class BSenseExperimentApp:
                 "unix_time": time.time(),
             }
         )
+        if not self.auto_labrecorder.get():
+            self._show_task_action(
+                "正在中止模块",
+                "请先在 LabRecorder 中点击 Stop 保存当前数据，再确认继续。",
+                "已停止，保存并返回",
+                lambda: self._stop_and_return(aborted=True),
+                allow_abort=False,
+            )
+            return
         self._stop_and_return(aborted=True)
 
     def _stop_and_return(self, aborted: bool) -> None:
+        if self.stopping:
+            return
+        self.stopping = True
         if self.tick_id is not None:
             self.root.after_cancel(self.tick_id)
             self.tick_id = None
@@ -660,34 +1371,96 @@ class BSenseExperimentApp:
         threading.Thread(target=stop, daemon=True).start()
 
     def _stopped(self, aborted: bool, error: Exception | None, final_size: int | None) -> None:
+        self.stopping = False
+        completed_task = self.current_task
+        completed_title = PROTOCOL_BY_TASK[completed_task].title if completed_task else "当前模块"
         if error is not None:
-            messagebox.showwarning(
-                "XDF 未验证",
-                f"{error}\n\n请立即查看 LabRecorder，必要时手动点击 Stop。程序不会把本次任务标记为成功。",
-            )
             self.status.set("实验提示已结束，但 XDF 未通过保存验证")
         elif not self.auto_labrecorder.get():
-            messagebox.showinfo("停止录制", "请现在在 LabRecorder 中点击 Stop 保存 XDF。")
-            self.status.set(f"手动模式已结束，XDF 当前大小 {(final_size or 0) / 1024:.1f} KB")
+            self.status.set(f"{completed_title} 已结束，XDF 当前大小 {(final_size or 0) / 1024:.1f} KB")
         elif aborted:
-            self.status.set(f"实验已中止，XDF 已保存 {(final_size or 0) / 1024:.1f} KB")
+            self.status.set(f"{completed_title} 已中止，XDF 已保存 {(final_size or 0) / 1024:.1f} KB")
         else:
-            self.status.set(f"实验完成，XDF 已验证并保存 {(final_size or 0) / 1024:.1f} KB")
-        self._return_to_setup()
+            self.status.set(f"{completed_title} 完成，XDF 已验证并保存 {(final_size or 0) / 1024:.1f} KB")
 
-    def _return_to_setup(self) -> None:
+        succeeded = error is None and not aborted
+        if succeeded and completed_task in self.module_vars:
+            self.module_vars[completed_task].set(False)
+            self._update_estimate()
+        self._close_current_files()
         self.active = False
-        self.labrecorder_started = False
+
+        if error is not None:
+            self._show_task_action(
+                "XDF 未通过保存验证",
+                f"{error}\n\n请立即查看 LabRecorder，必要时手动点击 Stop。本模块不会被标记为成功。",
+                "返回首页检查",
+                self._return_to_setup,
+            )
+            return
+        if aborted:
+            self._show_task_action(
+                "模块已中止",
+                f"{completed_title} 的已采数据已保存，重新采集时请使用新的 Run 编号。",
+                "返回首页",
+                self._return_to_setup,
+            )
+            return
+
+        has_next = succeeded and self.module_index + 1 < len(self.module_queue)
+        if has_next:
+            next_task = self.module_queue[self.module_index + 1]
+            self.pending_next_task = next_task
+            self._show_task_action(
+                "模块已保存",
+                f"{completed_title} 已完成。下一个模块：{PROTOCOL_BY_TASK[next_task].title}",
+                "开始下一个模块",
+                self._continue_to_next_module,
+                secondary_text="暂不继续，返回首页",
+                secondary_command=self._return_to_setup,
+            )
+            return
+        self._show_task_action(
+            "采集完成",
+            "所有所选模块均已完成并保存。",
+            "返回首页",
+            self._return_to_setup,
+        )
+
+    def _continue_to_next_module(self) -> None:
+        if self.pending_next_task is None:
+            return
+        self.module_index += 1
+        self._begin_current_module()
+
+    def _close_current_files(self) -> None:
         if self.log_handle:
             self.log_handle.close()
             self.log_handle = None
+        self.event_log_path = None
+        self.labrecorder_started = False
         self.xdf_path = None
         self.recorder_log_path = None
+        self.current_response_time = None
+
+    def _return_to_setup(self) -> None:
+        self.active = False
+        self.stopping = False
+        self._close_current_files()
+        self.action_button.pack_forget()
+        self.secondary_button.pack_forget()
+        self.abort_button.pack(side="right")
+        self.quality_frame.pack_forget()
+        self._hide_inline_form()
+        self._display_visual(None)
         self.root.attributes("-fullscreen", False)
         self.task_frame.pack_forget()
         self.setup_frame.pack(fill="both", expand=True)
 
     def on_close(self) -> None:
+        if self.stopping:
+            self.status.set("正在停止 LabRecorder 并验证文件，请稍候，暂时不能关闭。")
+            return
         if self.active:
             self.abort_experiment()
             return
@@ -713,6 +1486,15 @@ def run_self_test() -> None:
         pass
     else:
         raise AssertionError("Identifier validation accepted spaces")
+    protocol_summary: dict[str, dict[str, float | int]] = {}
+    for protocol in PROTOCOLS:
+        plan = build_protocol_plan(protocol.task, short=True, seed=42)
+        assert plan[0].event == "experiment_start"
+        assert plan[-1].event == "experiment_end"
+        protocol_summary[protocol.task] = {
+            "steps": len(plan),
+            "duration_s": round(sum(step.duration for step in plan), 1),
+        }
     print(
         json.dumps(
             {
@@ -723,6 +1505,7 @@ def run_self_test() -> None:
                 "full_steps": len(full_plan),
                 "full_markers": len(full_events),
                 "full_duration_s": round(sum(step.duration for step in full_plan), 1),
+                "protocols": protocol_summary,
                 "status": "ok",
             },
             ensure_ascii=False,

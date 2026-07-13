@@ -19,7 +19,7 @@ BioMultiLite 1.0.9-E-Release
 LabRecorder v1.17.1 release / Windows asset 1.17.0
 Python 3.13 x64
 pylsl 1.18.2
-bsense-lsl 0.2.5
+bsense-lsl 0.4.1
 EEG 2 channels
 RCS 127.0.0.1:22345
 ```
@@ -35,6 +35,10 @@ RCS 127.0.0.1:22345
 7. LabRecorder 启用 RCS 22345，当前未录制。
 8. 不启动 BioMultiLite 本地 REC。
 9. 先运行短流程。
+10. 正式采集确认已取消“短流程”，并记录所选模块及顺序。
+11. 自动扫描确认 EEG、fNIRS、Motion、Metric、Heart Rate 和 General Metric 六类数值流齐全。
+12. 试听过渡提示音并确认音量舒适；若研究方案不允许听觉提示，应在首页关闭。
+13. M1、M2、M4A、M4B 已在正式录制外完成指导与练习。
 
 ## 短流程验收
 
@@ -57,6 +61,18 @@ RCS 127.0.0.1:22345
 - 点头主要落在 Gyro Y；
 - 摇头取消具有双向 X 波动；
 - 所有异常都写入会话备注。
+
+## 正式模块验收
+
+- 每个完成模块都有独立、非零的 XDF、`events.jsonl` 和 `recorder.jsonl`；
+- M1 每个 Run 的左手、右手、空闲各 10 Trial，四个 Run 合计每类 40 Trial；
+- M2 每个负荷等级 3 个 Block，每个 Block 60 个刺激，并存在对应 `nback_trial_result`；
+- M2 区块评分和 M3B 两分钟评分没有缺失；
+- 随机化任务的 Marker 均含 `protocol_seed`；
+- M4B 每轮恰有一个 `is_target=true` 的高亮；
+- 被中止的模块保留 `experiment_abort`，不得标记为成功数据。
+- 所有实际播放的过渡提示音均存在 `audio_cue` Marker；
+- `participants` 受限资料目录未进入共享或训练数据包。
 
 ## 跨电脑复现
 
