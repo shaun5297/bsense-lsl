@@ -66,6 +66,12 @@ class ProtocolTests(unittest.TestCase):
                     for index in range(2, len(run_conditions))
                 )
             )
+        self.assertEqual(sum(step.event == "mi_cue" for step in first), 120)
+        self.assertEqual(sum(step.event == "mi_trial_end" for step in first), 120)
+        run_ratings = [step for step in first if step.event == "mi_run_rating_start"]
+        self.assertEqual(len(run_ratings), 4)
+        self.assertTrue(all(step.advance == "form" for step in run_ratings))
+        self.assertTrue(all(step.metadata["rating_scope"] == "run" for step in run_ratings))
 
     def test_nback_stimuli_are_response_aware(self) -> None:
         plan = build_protocol_plan("m2_nback", short=True, seed=42)
@@ -74,9 +80,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(all(step.response_key == "space" for step in stimuli))
         self.assertEqual({step.metadata["level"] for step in stimuli}, {0, 1, 2})
         self.assertTrue(all("is_target" in step.metadata for step in stimuli))
+        self.assertTrue(all("position_in_block" in step.metadata for step in stimuli))
         for level in (0, 1, 2):
             level_stimuli = [step for step in stimuli if step.metadata["level"] == level]
             self.assertEqual(sum(bool(step.metadata["is_target"]) for step in level_stimuli), 2)
+        self.assertEqual(sum(step.event == "nback_task_end" for step in plan), 3)
+        self.assertEqual(sum(step.event == "block_rest_end" for step in plan), 3)
 
     def test_nback_supports_counterbalanced_level_order(self) -> None:
         plan = build_protocol_plan("m2_nback", short=True, seed=1, nback_order="counterbalanced")
@@ -98,6 +107,9 @@ class ProtocolTests(unittest.TestCase):
         closed_rest = next(step for step in plan if step.event == "rest_closed_start")
         self.assertEqual(closed_rest.warning_sound, "ending_soon")
         self.assertEqual(closed_rest.end_sound, "open_eyes")
+        settle = next(step for step in plan if step.event == "baseline_settle_start")
+        self.assertIn("自然呼吸", settle.detail)
+        self.assertIn("不要刻意深呼吸", settle.detail)
 
     def test_m4b_marks_selected_target(self) -> None:
         plan = build_protocol_plan("m4b_target", short=True, seed=42, target_object="手机")
@@ -106,6 +118,10 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(selected), 2)
         self.assertTrue(all(step.metadata["object"] == "手机" for step in selected))
         self.assertTrue(all(step.visual in {"水杯", "药瓶", "手机"} for step in highlights))
+        self.assertTrue(all("运动想象" not in step.detail for step in highlights))
+        self.assertTrue(all(step.metadata["fnirs_analysis_scope"] == "block_level_only" for step in highlights))
+        rating = next(step for step in plan if step.event == "target_attention_rating_start")
+        self.assertEqual(rating.advance, "form")
 
     def test_m4a_balances_objects_within_each_condition(self) -> None:
         plan = build_protocol_plan("m4a_intent", seed=42)
@@ -115,6 +131,54 @@ class ProtocolTests(unittest.TestCase):
             counts = [sum(step.metadata["object"] == object_name for step in condition) for object_name in ("水杯", "药瓶", "手机")]
             self.assertEqual(len(condition), 40)
             self.assertLessEqual(max(counts) - min(counts), 1)
+            self.assertTrue(all(step.metadata["paradigm"] == "externally_cued_intent" for step in condition))
+        self.assertEqual(sum(step.event == "intent_present" for step in plan), 40)
+        self.assertEqual(sum(step.event == "intent_absent" for step in plan), 40)
+        self.assertEqual(sum(step.event == "intent_trial_end" for step in plan), 80)
+        self.assertTrue(any(step.event == "intent_rating_start" for step in plan))
+
+    def test_m3a_marks_expected_artifacts_without_claiming_contamination(self) -> None:
+        plan = build_protocol_plan("m3a_safety", short=True)
+        action = next(step for step in plan if step.event == "motion_nod")
+        self.assertEqual(action.metadata["artifact_expectation"], "motion_expected")
+        self.assertEqual(action.metadata["quality_status"], "requires_offline_review")
+        self.assertNotIn("eeg_contaminated", action.metadata)
+        self.assertNotIn("fnirs_contaminated", action.metadata)
+
+    def test_m3b_uses_kss_and_explicit_segment_boundaries(self) -> None:
+        plan = build_protocol_plan("m3b_fatigue", seed=42)
+        ratings = [step for step in plan if step.event == "fatigue_rating_start"]
+        self.assertEqual(len(ratings), 5)
+        self.assertTrue(all({field.key for field in rating.fields} == {"kss_score", "mental_fatigue_score"} for rating in ratings))
+        self.assertTrue(all(rating.fields[0].maximum == 9 for rating in ratings))
+        self.assertEqual(sum(step.event == "fatigue_segment_start" for step in plan), 5)
+        self.assertEqual(sum(step.event == "fatigue_segment_end" for step in plan), 5)
+        self.assertEqual(sum(step.event == "fatigue_recovery_start" for step in plan), 1)
+        stimuli = [step for step in plan if step.event == "nback_stimulus"]
+        self.assertEqual({step.metadata["segment"] for step in stimuli}, {1, 2, 3, 4, 5})
+        self.assertEqual({step.metadata["position_in_block"] for step in stimuli}, set(range(1, 61)))
+        for segment in range(1, 6):
+            segment_stimuli = [step for step in stimuli if step.metadata["segment"] == segment]
+            self.assertEqual(sum(bool(step.metadata["is_target"]) for step in segment_stimuli), 15)
+            self.assertTrue(all(step.metadata["sequence_reset"] for step in segment_stimuli))
+
+    def test_m5_contains_structured_debrief(self) -> None:
+        plan = build_protocol_plan("m5_debrief")
+        debrief = next(step for step in plan if step.event == "debrief_start")
+        self.assertEqual(debrief.advance, "form")
+        self.assertEqual(
+            {field.key for field in debrief.fields},
+            {
+                "kss_score",
+                "mi_difficulty",
+                "easiest_task",
+                "hardest_task",
+                "device_comfort",
+                "headache",
+                "dizziness_or_nausea",
+                "skin_or_device_discomfort",
+            },
+        )
 
 
 if __name__ == "__main__":

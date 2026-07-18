@@ -2,18 +2,18 @@
 
 ## 只有 events.jsonl，没有 XDF
 
-`events.jsonl` 只证明实验程序运行过。v0.4.1 会等待目标 XDF 创建，未创建时不会开始任务。
+`events.jsonl` 只证明实验程序运行过。程序会等待目标 XDF 创建，未创建时不会开始任务。
 
 检查同名 `_recorder.jsonl`：
 
-- 是否有 `rcs_connected`；
-- 每条 `rcs_command` 是否返回 `OK`；
-- 是否有 `xdf_created`；
+- 内置模式是否有 `stream_opened` 和 `recording_started`；
+- 是否有 `recording_error`；
+- LabRecorder RCS 兼容模式是否有 `rcs_connected`、`rcs_command` 和 `xdf_created`；
 - 目标路径是否可写。
 
-如果界面在模块结束时提示等待 `stop` 超时，但 XDF 已经存在，请先查看 LabRecorder 是否仍在写盘。v0.4.1 已将停止命令的响应窗口从 5 秒延长到 60 秒；再次采集时必须增加 Run 编号，程序不会覆盖现有 XDF。
+如果启动前检查失败且尚未创建 XDF/events，可以修复流配置后沿用同一 Run 重试；`_recorder.jsonl` 会保留最近一次启动诊断。如果已经创建 XDF 或 events，则再次采集必须增加 Run 编号。若内置录制报告某个流的接收线程错误，应保留该文件和诊断日志用于排查，但不要将该 Run 标记为成功数据。
 
-## 无法连接 RCS
+## 无法连接 RCS（仅兼容模式）
 
 1. LabRecorder 是否正在运行；
 2. `Enable RCS` 是否勾选；
@@ -21,22 +21,38 @@
 4. 是否有其他程序占用端口；
 5. 防火墙是否允许本机 TCP。
 
-## LabRecorder 看不到流
+macOS 还应确认启动的是 `LabRecorder.app` 而不是仅下载了 `App-LabRecorder` 源码。可执行 `bash "macos/open_labrecorder.sh"`，或在实验程序中点击“打开 LabRecorder（兼容模式）”。
+
+## 内置录制器或 LabRecorder 看不到流
 
 1. BioMultiLite LSL 是否已点击 `Start`；
-2. LabRecorder 点击 `Update`；
+2. 先用“自动扫描 LSL 数据流”确认实验机能发现远端流；兼容模式再在 LabRecorder 点击 `Update`；
 3. 关闭 VPN、代理和不必要的虚拟网卡；
 4. 确认程序启动后能看到 `BSense Experiment Markers`；
-5. 重启顺序：BioMultiLite -> LSL Start -> 实验程序 -> LabRecorder Update。
+5. 默认模式重启顺序：BioMultiLite -> LSL Start -> 实验程序；兼容模式最后执行 LabRecorder Update。
+
+macOS 双机模式额外检查：
+
+- Windows 与 Mac 是否处于同一局域网和同一网段；
+- 是否已允许终端/Python 的 macOS“本地网络”权限；兼容模式还需允许 LabRecorder；
+- 两端是否关闭 VPN、代理和非必要虚拟网卡；
+- 防火墙或路由器是否阻止 LSL 发现流量；
+- BioMultiLite 必须继续在 Windows 运行；macOS 上的 `bsense-lsl` 不直接连接 BSense-R 蓝牙。
 
 ## 实时监测看不到流
 
 1. BioMultiLite 必须已连接头环；
 2. 在 BioMultiLite 的 LSL 页面勾选目标流并点击 `Start`；
 3. 点击实时监测窗口的“重新扫描”；
-4. 确认 BioMultiLite、LabRecorder 和本项目使用相同的 Windows 网络配置；
+4. 确认 BioMultiLite 设备机与运行本项目的实验机网络可互通；
 5. 关闭 VPN、代理和不必要的虚拟网卡后重试；
-6. LabRecorder 能看到流但监测看不到时，记录流的 Name、Type 和 Channel count 以便检查厂商版本差异。
+6. 记录流的 Name、Type 和 Channel count，以便检查厂商版本差异。
+
+若状态栏提示厂商流没有 `source_id`，说明发布端重启后不能自动恢复旧连接。这不是当前样本丢失；如果 BioMultiLite 或其 LSL 发布被重启，请点击“重新扫描”。
+
+## 采样率显示与元数据不一致
+
+实时窗口优先显示依据时间戳计算的实测值。当前已知 Metric 元数据为 250 Hz、实测约 25 Hz，这是厂商发布信息与实际节奏不一致，不是监测窗口主动降采样。离线分析应依据时间戳重采样，并保存实际读取和预处理参数。
 
 ## EEG 出现恒定通道
 

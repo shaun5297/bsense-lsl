@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +29,9 @@ class ParticipantProfileTests(unittest.TestCase):
             self.assertEqual(payload["name"], "测试被试")
             self.assertEqual(payload["age"], 72)
             self.assertTrue(payload["consent_confirmed"])
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_existing_profile_rejects_conflicting_identity(self) -> None:
         profile = validate_participant_profile(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -10,6 +11,16 @@ from pathlib import Path
 SEX_OPTIONS = ("女", "男", "其他", "不愿透露")
 HAND_OPTIONS = ("左", "右", "双手")
 PROFILE_FIELDS = ("name", "age", "sex", "education_years", "dominant_hand")
+
+
+def _restrict_profile_permissions(path: Path) -> None:
+    """Keep direct identifiers private on POSIX; Windows relies on directory ACLs."""
+
+    if os.name == "nt":
+        return
+    path.parent.chmod(0o700)
+    if path.exists():
+        path.chmod(0o600)
 
 
 def validate_participant_profile(
@@ -68,6 +79,7 @@ def save_participant_profile(
 ) -> tuple[Path, bool]:
     path = participant_profile_path(output_root, participant, session)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _restrict_profile_permissions(path)
     if path.exists():
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
@@ -91,7 +103,10 @@ def save_participant_profile(
         "app_version": app_version,
         "created_unix_time": time.time(),
     }
-    with path.open("x", encoding="utf-8") as handle:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    file_descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    _restrict_profile_permissions(path)
     return path, True

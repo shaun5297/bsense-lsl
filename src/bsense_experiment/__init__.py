@@ -1,3 +1,3 @@
 """BSense-R LSL experiment control package."""
 
-__version__ = "0.4.1"
+__version__ = "0.7.0"

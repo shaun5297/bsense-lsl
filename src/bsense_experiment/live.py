@@ -2,7 +2,7 @@
 
 The classes in this module deliberately do not depend on a GUI.  A future
 classifier can consume the same :class:`DataWindow` objects used by the live
-monitor while LabRecorder records the streams independently.
+monitor while the built-in recorder captures the streams independently.
 """
 
 from __future__ import annotations
@@ -84,6 +84,18 @@ class DataWindow:
     def is_live(self) -> bool:
         return self.last_received_monotonic is not None and time.monotonic() - self.last_received_monotonic < 2.5
 
+    @property
+    def duration(self) -> float:
+        if len(self.timestamps) < 2:
+            return 0.0
+        return max(0.0, self.timestamps[-1] - self.timestamps[0])
+
+    @property
+    def observed_srate(self) -> float | None:
+        if self.duration <= 0:
+            return None
+        return (len(self.timestamps) - 1) / self.duration
+
 
 class StreamBuffer:
     """Bounded, thread-safe LSL sample buffer."""
@@ -164,7 +176,37 @@ def _safe_info_value(info: Any, method_name: str, default: Any) -> Any:
         return default
 
 
-def _channel_labels(info: Any, channel_count: int) -> tuple[str, ...]:
+def _fallback_channel_labels(kind: str, channel_count: int) -> tuple[str, ...]:
+    known_labels = {
+        "eeg": ("Fp1", "Fp2"),
+        "fnirs": (
+            "S1D1 · 735nm",
+            "S1D2 · 735nm",
+            "S1D3 · 735nm",
+            "S1D4 · 735nm",
+            "S2D5 · 735nm",
+            "S2D6 · 735nm",
+            "S2D7 · 735nm",
+            "S2D8 · 735nm",
+            "S1D1 · 850nm",
+            "S1D2 · 850nm",
+            "S1D3 · 850nm",
+            "S1D4 · 850nm",
+            "S2D5 · 850nm",
+            "S2D6 · 850nm",
+            "S2D7 · 850nm",
+            "S2D8 · 850nm",
+        ),
+        "motion": ("Accel X", "Accel Y", "Accel Z", "Gyro X", "Gyro Y", "Gyro Z"),
+        "metric": ("Metric 1", "Metric 2"),
+        "heart_rate": ("Heart Rate",),
+    }.get(kind, ())
+    if kind == "general_metric":
+        return tuple(f"通用指标 {index + 1}" for index in range(channel_count))
+    return tuple(known_labels[index] if index < len(known_labels) else f"Ch{index + 1}" for index in range(channel_count))
+
+
+def _channel_labels(info: Any, kind: str, channel_count: int) -> tuple[str, ...]:
     labels: list[str] = []
     try:
         channel = info.desc().child("channels").child("channel")
@@ -176,7 +218,8 @@ def _channel_labels(info: Any, channel_count: int) -> tuple[str, ...]:
             channel = channel.next_sibling()
     except (AttributeError, RuntimeError, TypeError, ValueError):
         labels = []
-    labels.extend(f"Ch{index + 1}" for index in range(len(labels), channel_count))
+    fallback = _fallback_channel_labels(kind, channel_count)
+    labels.extend(fallback[index] for index in range(len(labels), channel_count))
     return tuple(labels)
 
 
@@ -199,7 +242,7 @@ def describe_stream(info: Any) -> StreamDescriptor | None:
         stream_type=stream_type or STREAM_KIND_LABELS[kind],
         channel_count=channel_count,
         nominal_srate=nominal_srate,
-        channel_labels=_channel_labels(info, channel_count),
+        channel_labels=_channel_labels(info, kind, channel_count),
         source_id=source_id,
     )
 
@@ -215,9 +258,15 @@ def _default_resolver(timeout: float) -> Iterable[Any]:
 
 
 def _default_inlet_factory(info: Any, buffer_seconds: float) -> Any:
-    from pylsl import StreamInlet
+    from pylsl import StreamInlet, proc_clocksync, proc_dejitter, proc_monotonize
 
-    return StreamInlet(info, max_buflen=max(1, math.ceil(buffer_seconds)), recover=True)
+    processing_flags = proc_clocksync | proc_dejitter | proc_monotonize
+    return StreamInlet(
+        info,
+        max_buflen=max(1, math.ceil(buffer_seconds)),
+        recover=True,
+        processing_flags=processing_flags,
+    )
 
 
 class _StreamWorker(threading.Thread):
@@ -325,7 +374,7 @@ class LiveStreamManager:
                 if current_worker is not None and current_worker.is_alive():
                     continue
                 buffer = self._buffers.get(descriptor.kind)
-                if buffer is None or buffer.descriptor.source_id != descriptor.source_id:
+                if buffer is None or buffer.descriptor != descriptor:
                     buffer = StreamBuffer(descriptor, self.buffer_seconds)
                     self._buffers[descriptor.kind] = buffer
                 worker = _StreamWorker(

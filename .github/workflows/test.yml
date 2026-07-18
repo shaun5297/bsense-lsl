@@ -5,8 +5,11 @@ on:
   pull_request:
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  cross-platform:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,4 +21,3 @@ jobs:
         run: python -m bsense_experiment --self-test
       - name: Unit tests
         run: python -m unittest discover -s tests -v
-

@@ -3,9 +3,11 @@ import unittest
 from unittest.mock import patch
 
 from bsense_experiment.live import (
+    DataWindow,
     LiveStreamManager,
     StreamBuffer,
     StreamDescriptor,
+    _fallback_channel_labels,
     _default_inlet_factory,
     canonical_stream_kind,
     describe_stream,
@@ -67,11 +69,11 @@ class LiveStreamTests(unittest.TestCase):
         self.assertEqual(canonical_stream_kind("Metric", "General Metric"), "general_metric")
         self.assertIsNone(canonical_stream_kind("Markers"))
 
-    def test_stream_descriptor_falls_back_to_channel_numbers(self) -> None:
+    def test_stream_descriptor_uses_known_vendor_channel_labels(self) -> None:
         descriptor = describe_stream(FakeInfo())
         self.assertIsNotNone(descriptor)
         assert descriptor is not None
-        self.assertEqual(descriptor.channel_labels, ("Ch1", "Ch2"))
+        self.assertEqual(descriptor.channel_labels, ("Fp1", "Fp2"))
         self.assertEqual(descriptor.nominal_srate, 250.0)
 
     def test_buffer_returns_latest_model_ready_window(self) -> None:
@@ -88,6 +90,8 @@ class LiveStreamTests(unittest.TestCase):
         self.assertEqual(window.samples[-1], (50.0, -50.0))
         self.assertEqual(window.total_samples_received, 51)
         self.assertTrue(window.is_live)
+        self.assertAlmostEqual(window.duration, 2.0)
+        self.assertAlmostEqual(window.observed_srate or 0.0, 10.0)
 
     def test_display_decimation_keeps_newest_sample(self) -> None:
         buffer = StreamBuffer(self.descriptor)
@@ -126,10 +130,29 @@ class LiveStreamTests(unittest.TestCase):
             manager.stop()
 
     def test_default_inlet_uses_integer_buffer_length(self) -> None:
+        from pylsl import proc_clocksync, proc_dejitter, proc_monotonize
+
         info = object()
         with patch("pylsl.StreamInlet") as inlet_class:
             _default_inlet_factory(info, 60.0)
-        inlet_class.assert_called_once_with(info, max_buflen=60, recover=True)
+        inlet_class.assert_called_once_with(
+            info,
+            max_buflen=60,
+            recover=True,
+            processing_flags=proc_clocksync | proc_dejitter | proc_monotonize,
+        )
+
+    def test_general_metric_fallback_labels_do_not_claim_unknown_semantics(self) -> None:
+        self.assertEqual(
+            _fallback_channel_labels("general_metric", 3),
+            ("通用指标 1", "通用指标 2", "通用指标 3"),
+        )
+
+    def test_empty_window_has_no_observed_rate(self) -> None:
+        window = DataWindow(self.descriptor, (), (), 0, None)
+
+        self.assertEqual(window.duration, 0.0)
+        self.assertIsNone(window.observed_srate)
 
 
 if __name__ == "__main__":

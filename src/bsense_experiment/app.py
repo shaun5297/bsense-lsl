@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run BSense-R device-QC cues and record precise LSL markers on Windows."""
+"""Run BSense-R experiment cues and record precise LSL markers."""
 
 from __future__ import annotations
 
@@ -12,17 +12,28 @@ import sys
 import threading
 import time
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from tkinter import BooleanVar, PhotoImage, StringVar, Tk, Toplevel, messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
 from pylsl import IRREGULAR_RATE, StreamInfo, StreamOutlet, cf_string, local_clock
 
 from . import __version__
+from .embedded_recorder import EmbeddedRecorderClient
 from .participant import (
     HAND_OPTIONS,
     SEX_OPTIONS,
     save_participant_profile,
     validate_participant_profile,
+)
+from .platform_support import (
+    VOICE_CUE_TEXTS,
+    VOICE_CUE_VOICE,
+    audio_cues_supported,
+    default_output_root,
+    launch_labrecorder,
+    play_audio_cue,
+    ui_font_family,
 )
 from .live import STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, describe_stream
 from .protocols import (
@@ -45,16 +56,15 @@ DEFAULT_RCS_HOST = "127.0.0.1"
 DEFAULT_RCS_PORT = 22345
 LABRECORDER_STOP_TIMEOUT = 60.0
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+UI_FONT_FAMILY = ui_font_family()
+RECORDING_MODE_EMBEDDED = "内置 XDF 录制（推荐）"
+RECORDING_MODE_RCS = "LabRecorder RCS（兼容）"
+RECORDING_MODE_MANUAL = "LabRecorder 手动（兼容）"
+RECORDING_MODES = (RECORDING_MODE_EMBEDDED, RECORDING_MODE_RCS, RECORDING_MODE_MANUAL)
 OBJECT_ASSETS = {
     "水杯": "cup.png",
     "手机": "mobilephone.png",
     "药瓶": "medicinebottle.png",
-}
-AUDIO_PATTERNS = {
-    "start": ((880, 130),),
-    "ending_soon": ((740, 100), (0, 90), (740, 100)),
-    "open_eyes": ((880, 120), (0, 80), (1047, 180)),
-    "complete": ((784, 120), (0, 70), (988, 120), (0, 70), (1175, 220)),
 }
 
 
@@ -67,26 +77,6 @@ def validate_identifier(value: str, field_name: str) -> str:
 
 def build_xdf_filename(participant: str, session: str, task: str, run: str) -> str:
     return f"sub-{participant}_ses-{session}_task-{task}_run-{run}.xdf".lower()
-
-
-def play_windows_audio_cue(cue: str) -> bool:
-    if sys.platform != "win32" or cue not in AUDIO_PATTERNS:
-        return False
-
-    def play() -> None:
-        import winsound
-
-        for frequency, duration_ms in AUDIO_PATTERNS[cue]:
-            if frequency == 0:
-                time.sleep(duration_ms / 1000)
-            else:
-                try:
-                    winsound.Beep(frequency, duration_ms)
-                except RuntimeError:
-                    winsound.MessageBeep()
-
-    threading.Thread(target=play, daemon=True).start()
-    return True
 
 
 class LabRecorderClient:
@@ -209,7 +199,7 @@ class BSenseExperimentApp:
         self.root = root
         self.root.title("BSense-R 实验控制")
         self.root.geometry("1040x790")
-        self.root.minsize(900, 700)
+        self.root.minsize(900, 790)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<Escape>", lambda _event: self.abort_experiment())
         self.root.bind("<KeyPress-space>", self._on_response_key)
@@ -222,12 +212,12 @@ class BSenseExperimentApp:
         self.dominant_hand = StringVar(value="右")
         self.session = StringVar(value="01")
         self.run = StringVar(value="001")
-        self.output_root = StringVar(value=r"C:\BCI\data\bsense")
+        self.output_root = StringVar(value=str(default_output_root()))
         self.rcs_host = StringVar(value=DEFAULT_RCS_HOST)
         self.rcs_port = StringVar(value=str(DEFAULT_RCS_PORT))
         self.short_protocol = BooleanVar(value=default_short)
         self.older_adult = BooleanVar(value=False)
-        self.auto_labrecorder = BooleanVar(value=True)
+        self.recording_mode = StringVar(value=RECORDING_MODE_EMBEDDED)
         self.audio_enabled = BooleanVar(value=True)
         self.target_object = StringVar(value="水杯")
         self.nback_order = StringVar(value="由易到难（原方案）")
@@ -255,7 +245,7 @@ class BSenseExperimentApp:
             self.session,
         ):
             variable.trace_add("write", self._participant_form_changed)
-        for variable in (self.output_root, self.rcs_host, self.rcs_port, self.auto_labrecorder):
+        for variable in (self.output_root, self.rcs_host, self.rcs_port, self.recording_mode):
             variable.trace_add("write", self._recorder_config_changed)
 
         self.marker_outlet = self._create_marker_outlet()
@@ -280,23 +270,59 @@ class BSenseExperimentApp:
         self.object_images: dict[str, PhotoImage] = {}
         self.audio_warning_played = False
         self.pending_next_task: str | None = None
-        self.labrecorder_started = False
+        self.recorder_started = False
         self.xdf_path: Path | None = None
         self.xdf_initial_size = 0
         self.xdf_current_size = 0
         self.last_file_poll = 0.0
         self.recorder_log_path: Path | None = None
         self.live_monitor: LiveMonitorWindow | None = None
+        self.ui_actions: SimpleQueue[Callable[[], None]] = SimpleQueue()
+        self.ui_action_poll_id: str | None = None
 
         self._build_setup_view()
         self._build_task_view()
         self.task_frame.pack_forget()
+        self.ui_action_poll_id = self.root.after(50, self._poll_ui_actions)
+
+    def _post_to_ui(self, action: Callable[[], None]) -> None:
+        """Queue a Tk mutation for the main thread without calling Tk from workers."""
+
+        self.ui_actions.put(action)
+
+    def _poll_ui_actions(self) -> None:
+        self.ui_action_poll_id = None
+        try:
+            while True:
+                self.ui_actions.get_nowait()()
+        except Empty:
+            pass
+        finally:
+            if self.root.winfo_exists():
+                self.ui_action_poll_id = self.root.after(50, self._poll_ui_actions)
 
     def _participant_form_changed(self, *_args: object) -> None:
         self.consent_confirmed.set(False)
 
     def _recorder_config_changed(self, *_args: object) -> None:
         self.recorder_ready.set(False)
+        if hasattr(self, "recorder_ready_checkbutton"):
+            self._update_recording_mode_controls()
+
+    def _update_recording_mode_controls(self) -> None:
+        mode = self.recording_mode.get()
+        if mode == RECORDING_MODE_EMBEDDED:
+            self.recorder_ready.set(True)
+            self.recorder_ready_text.set("内置 XDF 录制已启用（无需 LabRecorder）")
+            self.recorder_ready_checkbutton.configure(state="disabled")
+        else:
+            self.recorder_ready_text.set(
+                "LabRecorder 已打开并启用 RCS" if mode == RECORDING_MODE_RCS else "LabRecorder 已打开并准备手动录制"
+            )
+            self.recorder_ready_checkbutton.configure(state="normal")
+        rcs_state = "normal" if mode == RECORDING_MODE_RCS else "disabled"
+        for entry in self.rcs_entries:
+            entry.configure(state=rcs_state)
 
     @staticmethod
     def _create_marker_outlet() -> StreamOutlet:
@@ -321,13 +347,13 @@ class BSenseExperimentApp:
         self.setup_frame = ttk.Frame(self.root, padding=22)
         self.setup_frame.pack(fill="both", expand=True)
 
-        ttk.Label(self.setup_frame, text="BSense-R 模块化数据采集", font=("Microsoft YaHei UI", 22, "bold")).grid(
+        ttk.Label(self.setup_frame, text="BSense-R 模块化数据采集", font=(UI_FONT_FAMILY, 22, "bold")).grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
         )
         ttk.Label(
             self.setup_frame,
             text="模块可独立运行或按顺序衔接；每个模块保存为独立 XDF，并在进入下一模块前确认。",
-            font=("Microsoft YaHei UI", 11),
+            font=(UI_FONT_FAMILY, 11),
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 12))
 
         self.setup_notebook = ttk.Notebook(self.setup_frame)
@@ -367,7 +393,7 @@ class BSenseExperimentApp:
         ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(14, 6))
         ttk.Label(
             subject_tab,
-            text="姓名只写入 participants 下的本地受限资料，不进入 XDF、文件名或逐条 Marker。",
+            text="姓名只写入 participants 下的本地资料，不进入 XDF、文件名或逐条 Marker。",
             foreground="#7a4b00",
         ).grid(row=5, column=0, columnspan=4, sticky="w")
         subject_tab.columnconfigure(1, weight=1)
@@ -376,17 +402,14 @@ class BSenseExperimentApp:
         module_frame = ttk.LabelFrame(module_tab, text="实验模块（可多选，按下列顺序执行）", padding=12)
         module_frame.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 12))
         for index, protocol in enumerate(PROTOCOLS):
-            row = index // 2
-            column = index % 2
             checkbutton = ttk.Checkbutton(
                 module_frame,
                 text=f"{protocol.title} [{protocol.priority}]  {protocol.description}",
                 variable=self.module_vars[protocol.task],
                 command=self._module_selection_changed,
             )
-            checkbutton.grid(row=row, column=column, sticky="w", padx=(0, 18), pady=5)
+            checkbutton.grid(row=index, column=0, sticky="w", padx=(0, 18), pady=4)
         module_frame.columnconfigure(0, weight=1)
-        module_frame.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
             module_tab,
@@ -439,14 +462,19 @@ class BSenseExperimentApp:
         module_tab.columnconfigure(2, weight=1)
         module_tab.columnconfigure(3, weight=1)
 
-        recorder_fields = (
-            ("数据目录", self.output_root),
-            ("RCS 主机", self.rcs_host),
-            ("RCS 端口", self.rcs_port),
-        )
-        for row, (label, variable) in enumerate(recorder_fields):
+        ttk.Label(recorder_tab, text="录制方式").grid(row=0, column=0, sticky="w", pady=7)
+        ttk.Combobox(
+            recorder_tab,
+            textvariable=self.recording_mode,
+            values=RECORDING_MODES,
+            state="readonly",
+        ).grid(row=0, column=1, columnspan=3, sticky="ew", padx=(10, 0), pady=7)
+        recorder_fields = (("数据目录", self.output_root), ("RCS 主机", self.rcs_host), ("RCS 端口", self.rcs_port))
+        self.rcs_entries: list[ttk.Entry] = []
+        for row, (label, variable) in enumerate(recorder_fields, start=1):
             ttk.Label(recorder_tab, text=label).grid(row=row, column=0, sticky="w", pady=7)
-            ttk.Entry(recorder_tab, textvariable=variable).grid(
+            entry = ttk.Entry(recorder_tab, textvariable=variable)
+            entry.grid(
                 row=row,
                 column=1,
                 columnspan=3,
@@ -454,61 +482,73 @@ class BSenseExperimentApp:
                 padx=(10, 0),
                 pady=7,
             )
+            if variable in (self.rcs_host, self.rcs_port):
+                self.rcs_entries.append(entry)
         ttk.Checkbutton(
             recorder_tab,
-            text="自动控制 LabRecorder（需勾选 Enable RCS，端口 22345）",
-            variable=self.auto_labrecorder,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 5))
-        ttk.Checkbutton(
-            recorder_tab,
-            text="启用 Windows 扬声器过渡提示音",
+            text="启用中文女声过渡提示",
             variable=self.audio_enabled,
-        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(12, 5))
-        checks = (
-            ("操作员在场且被试坐姿安全", self.operator_ready),
-            ("BioMultiLite 已连接且 7 类 LSL 流已启动", self.streams_ready),
-            ("LabRecorder 已打开并已完成 RCS/手动模式准备", self.recorder_ready),
-            ("已完成所选正式任务的指导与必要练习", self.practice_ready),
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(12, 5))
+        ttk.Checkbutton(recorder_tab, text="操作员在场且被试坐姿安全", variable=self.operator_ready).grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=4
         )
-        for row, (label, variable) in enumerate(checks, start=4):
-            ttk.Checkbutton(recorder_tab, text=label, variable=variable).grid(
-                row=row,
-                column=0,
-                columnspan=4,
-                sticky="w",
-                pady=4,
-            )
+        ttk.Checkbutton(recorder_tab, text="BioMultiLite 已连接且 7 类 LSL 流已启动", variable=self.streams_ready).grid(
+            row=6, column=0, columnspan=4, sticky="w", pady=4
+        )
+        self.recorder_ready_text = StringVar()
+        self.recorder_ready_checkbutton = ttk.Checkbutton(
+            recorder_tab,
+            textvariable=self.recorder_ready_text,
+            variable=self.recorder_ready,
+        )
+        self.recorder_ready_checkbutton.grid(row=7, column=0, columnspan=4, sticky="w", pady=4)
+        ttk.Checkbutton(
+            recorder_tab,
+            text="已完成所选正式任务的指导与必要练习",
+            variable=self.practice_ready,
+        ).grid(row=8, column=0, columnspan=4, sticky="w", pady=4)
         self.scan_streams_button = ttk.Button(recorder_tab, text="自动扫描 LSL 数据流", command=self.check_lsl_streams)
         self.scan_streams_button.grid(
-            row=8,
+            row=9,
             column=0,
             sticky="w",
             pady=(12, 4),
         )
         ttk.Label(recorder_tab, textvariable=self.stream_check_status, wraplength=760).grid(
-            row=8,
+            row=9,
             column=1,
             columnspan=3,
             sticky="w",
             padx=(12, 0),
             pady=(12, 4),
         )
+        audio_column = 0
+        if sys.platform == "darwin":
+            ttk.Button(recorder_tab, text="打开 LabRecorder（兼容模式）", command=self.open_labrecorder).grid(
+                row=10,
+                column=0,
+                sticky="w",
+                pady=(8, 0),
+            )
+            audio_column = 1
         ttk.Button(recorder_tab, text="试听过渡提示音", command=self.test_audio_cue).grid(
-            row=9,
-            column=0,
+            row=10,
+            column=audio_column,
             sticky="w",
+            padx=(12, 0) if audio_column else 0,
             pady=(8, 0),
         )
         ttk.Label(recorder_tab, text="正式采集时仅在过渡边界播放，并同步写入 Marker。", foreground="#7a4b00").grid(
-            row=9,
-            column=1,
-            columnspan=3,
+            row=10,
+            column=2,
+            columnspan=2,
             sticky="w",
             padx=(12, 0),
             pady=(8, 0),
         )
         recorder_tab.columnconfigure(1, weight=1)
         recorder_tab.columnconfigure(3, weight=1)
+        self._update_recording_mode_controls()
 
         ttk.Label(self.setup_frame, textvariable=self.estimate_text).grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 2))
         ttk.Label(self.setup_frame, textvariable=self.selection_warning, foreground="#9a5a00").grid(
@@ -562,9 +602,20 @@ class BSenseExperimentApp:
             )
             for task in selected
         )
-        manual_note = "（另含人工确认/问卷时间）" if any(task in {"m0_baseline", "m2_nback", "m3a_safety", "m3b_fatigue"} for task in selected) else ""
+        manual_tasks = {
+            "m0_baseline",
+            "m1_mi",
+            "m2_nback",
+            "m3a_safety",
+            "m3b_fatigue",
+            "m4a_intent",
+            "m4b_target",
+            "m5_debrief",
+        }
+        manual_note = "（另含人工确认/问卷时间）" if any(task in manual_tasks for task in selected) else ""
         self.estimate_text.set(f"已选 {len(selected)} 个模块，自动计时约 {seconds / 60:.1f} 分钟{manual_note}")
-        missing_baseline = "m0_baseline" not in selected and any(task.startswith("m") for task in selected)
+        physiological_tasks = {task for task in selected if task not in {"deviceqc", "m0_baseline", "m5_debrief"}}
+        missing_baseline = "m0_baseline" not in selected and bool(physiological_tasks)
         self.selection_warning.set("提示：未选择 M0，本会话正式任务将缺少个体基线。" if missing_baseline else "")
 
     def open_live_monitor(self) -> None:
@@ -593,19 +644,27 @@ class BSenseExperimentApp:
                         found.add(descriptor.kind)
             except Exception as caught:  # noqa: BLE001 - reported inline on the setup page
                 error = caught
-            self.root.after(0, lambda: self._lsl_scan_finished(found, error))
+            self._post_to_ui(lambda found=found, error=error: self._lsl_scan_finished(found, error))
 
         threading.Thread(target=scan, daemon=True).start()
 
+    def open_labrecorder(self) -> None:
+        try:
+            app_path = launch_labrecorder()
+        except (FileNotFoundError, OSError, RuntimeError) as error:
+            self.stream_check_status.set(f"LabRecorder 启动失败：{error}")
+            return
+        self.stream_check_status.set(f"已打开 LabRecorder：{app_path}")
+
     def test_audio_cue(self) -> None:
-        if sys.platform != "win32":
-            self.stream_check_status.set("提示音仅在 Windows 正式环境中播放。")
+        if not audio_cues_supported():
+            self.stream_check_status.set("当前系统缺少可用的系统提示音播放器。")
             return
         if not self.audio_enabled.get():
-            self.stream_check_status.set("请先勾选“启用 Windows 扬声器过渡提示音”。")
+            self.stream_check_status.set("请先勾选“启用中文女声过渡提示”。")
             return
-        play_windows_audio_cue("open_eyes")
-        self.stream_check_status.set("已播放试听音；请确认音量舒适且被试能够听见。")
+        play_audio_cue("open_eyes")
+        self.stream_check_status.set("已播放中文女声试听；请确认音量舒适且被试能够听见。")
 
     def _lsl_scan_finished(self, found: set[str], error: Exception | None) -> None:
         self.scan_streams_button.configure(state="normal")
@@ -621,11 +680,11 @@ class BSenseExperimentApp:
             self.stream_check_status.set(f"已发现：{found_labels or '无'}；缺少：{missing_labels}")
             return
         self.streams_ready.set(True)
-        self.stream_check_status.set(f"六类数值流已就绪：{found_labels}。BioMultiLite Marker 请在 LabRecorder 中确认。")
+        self.stream_check_status.set(f"六类数值流已就绪：{found_labels}。开始录制时还会检查两条 Marker 流。")
 
     def _build_task_view(self) -> None:
         self.task_frame = ttk.Frame(self.root, padding=28)
-        self.progress_label = ttk.Label(self.task_frame, text="", font=("Microsoft YaHei UI", 14))
+        self.progress_label = ttk.Label(self.task_frame, text="", font=(UI_FONT_FAMILY, 14))
         self.progress_label.pack(anchor="nw")
         ttk.Separator(self.task_frame).pack(fill="x", pady=12)
 
@@ -639,7 +698,7 @@ class BSenseExperimentApp:
             text="",
             anchor="center",
             justify="center",
-            font=("Microsoft YaHei UI", 54, "bold"),
+            font=(UI_FONT_FAMILY, 54, "bold"),
             wraplength=1100,
         )
         self.cue_label.grid(row=1, column=0, sticky="nsew", pady=4)
@@ -648,7 +707,7 @@ class BSenseExperimentApp:
             text="",
             anchor="center",
             justify="center",
-            font=("Microsoft YaHei UI", 22),
+            font=(UI_FONT_FAMILY, 22),
             wraplength=1050,
         )
         self.detail_label.grid(row=2, column=0, sticky="ew", pady=8)
@@ -659,7 +718,7 @@ class BSenseExperimentApp:
             self.task_content,
             text="",
             anchor="center",
-            font=("Microsoft YaHei UI", 36, "bold"),
+            font=(UI_FONT_FAMILY, 36, "bold"),
         )
         self.countdown_label.grid(row=4, column=0, sticky="ew", pady=8)
         self.task_content.columnconfigure(0, weight=1)
@@ -733,7 +792,7 @@ class BSenseExperimentApp:
         self.form_variables = {}
         self.form_error.set("")
         for row, field in enumerate(step.fields):
-            ttk.Label(self.form_frame, text=field.label, font=("Microsoft YaHei UI", 16)).grid(
+            ttk.Label(self.form_frame, text=field.label, font=(UI_FONT_FAMILY, 16)).grid(
                 row=row,
                 column=0,
                 sticky="w",
@@ -753,7 +812,7 @@ class BSenseExperimentApp:
                 textvariable=variable,
                 values=values,
                 state="readonly",
-                font=("Microsoft YaHei UI", 15),
+                font=(UI_FONT_FAMILY, 15),
             ).grid(row=row, column=1, sticky="ew", pady=7)
         ttk.Label(self.form_frame, textvariable=self.form_error, foreground="#b00020").grid(
             row=len(step.fields),
@@ -794,7 +853,7 @@ class BSenseExperimentApp:
     ) -> None:
         self._hide_inline_form()
         self._display_visual(None)
-        self.cue_label.configure(text=title, font=("Microsoft YaHei UI", 48, "bold"))
+        self.cue_label.configure(text=title, font=(UI_FONT_FAMILY, 48, "bold"))
         self.detail_label.configure(text=detail)
         self.countdown_label.configure(text="")
         self.action_button.configure(text=primary_text, command=primary_command)
@@ -894,8 +953,8 @@ class BSenseExperimentApp:
             self._show_setup_error(str(error), 0)
             return
         try:
-            port = DEFAULT_RCS_PORT
-            if self.auto_labrecorder.get():
+            port: int | None = None
+            if self.recording_mode.get() == RECORDING_MODE_RCS:
                 port = int(self.rcs_port.get())
                 if not 1 <= port <= 65535:
                     raise ValueError("RCS 端口范围应为 1-65535")
@@ -922,7 +981,7 @@ class BSenseExperimentApp:
         existing: list[Path] = []
         for task in selected:
             filename, target_path, log_path, recorder_log_path = self._paths_for_task(context, output_root, task)
-            existing.extend(path for path in (target_path, log_path, recorder_log_path) if path.exists())
+            existing.extend(path for path in (target_path, log_path) if path.exists())
         if existing:
             self._show_setup_error(
                 "目标文件已存在，请更换 Run 编号：" + "；".join(str(path) for path in existing),
@@ -969,6 +1028,7 @@ class BSenseExperimentApp:
             "protocol_seed": seed,
             "module_index": self.module_index + 1,
             "module_count": len(self.module_queue),
+            "module_sequence": self.module_queue,
         }
         nback_order = "counterbalanced" if self.nback_order.get().startswith("拉丁方") else "ascending"
         if task == "m2_nback":
@@ -987,7 +1047,7 @@ class BSenseExperimentApp:
         self.current_response_time = None
         self.block_results = {}
         self.pending_next_task = None
-        self.labrecorder_started = False
+        self.recorder_started = False
         self.xdf_initial_size = 0
         self.xdf_current_size = 0
         self.last_file_poll = 0.0
@@ -998,7 +1058,7 @@ class BSenseExperimentApp:
         self.cue_label.configure(text="正在准备录制")
         self.detail_label.configure(
             text=f"{PROTOCOL_BY_TASK[task].title}（{self.module_index + 1}/{len(self.module_queue)}）\n"
-            "请观察 LabRecorder 是否开始计时且文件大小增长"
+            "正在订阅 LSL 流并创建 XDF 文件"
         )
         self.countdown_label.configure(text="")
         self.progress_label.configure(text=f"输出文件：{filename}")
@@ -1009,22 +1069,27 @@ class BSenseExperimentApp:
         self.secondary_button.pack_forget()
         self.abort_button.pack(side="right")
 
-        if self.auto_labrecorder.get():
-            if port is None:
-                port = int(self.rcs_port.get())
-            client = LabRecorderClient(self.rcs_host.get().strip(), port)
+        mode = self.recording_mode.get()
+        if mode != RECORDING_MODE_MANUAL:
+            if mode == RECORDING_MODE_EMBEDDED:
+                client: LabRecorderClient | EmbeddedRecorderClient = EmbeddedRecorderClient()
+            else:
+                if port is None:
+                    port = int(self.rcs_port.get())
+                client = LabRecorderClient(self.rcs_host.get().strip(), port)
 
             def prepare() -> None:
                 try:
                     xdf_path, initial_size = client.start_recording(self.output_directory, filename)
                 except Exception as error:  # noqa: BLE001 - surfaced to the operator
                     if self.recorder_log_path is not None:
+                        client._record_diagnostic("recording_start_failed", error=str(error))
                         client.write_diagnostics(self.recorder_log_path)
-                    self.root.after(0, lambda error=error: self._prepare_failed(error))
+                    self._post_to_ui(lambda error=error: self._prepare_failed(error))
                     return
                 if self.recorder_log_path is not None:
                     client.write_diagnostics(self.recorder_log_path)
-                self.root.after(0, lambda: self._recording_ready(client, xdf_path, initial_size))
+                self._post_to_ui(lambda: self._recording_ready(client, xdf_path, initial_size))
 
             threading.Thread(target=prepare, daemon=True).start()
         else:
@@ -1033,25 +1098,35 @@ class BSenseExperimentApp:
     def _prepare_failed(self, error: Exception) -> None:
         if not self.active or self.stopping:
             return
-        self.status.set(f"无法控制 LabRecorder：{error}")
+        self.status.set(f"无法启动录制：{error}")
         self.active = False
         self._close_current_files()
+        detail = (
+            "请确认所有 LSL 流已启动、网络可达且目标目录可写。"
+            if self.recording_mode.get() == RECORDING_MODE_EMBEDDED
+            else "请确认 RCS 配置、目标目录权限，并检查 LabRecorder 当前未在录制。"
+        )
         self._show_task_action(
-            "LabRecorder 连接失败",
-            f"{error}\n\n请确认 RCS 配置、目标目录权限，并检查 LabRecorder 当前未在录制。",
+            "录制启动失败",
+            f"{error}\n\n{detail}",
             "返回首页检查",
             self._return_to_setup,
         )
 
-    def _recording_ready(self, client: LabRecorderClient, xdf_path: Path, initial_size: int) -> None:
+    def _recording_ready(
+        self,
+        client: LabRecorderClient | EmbeddedRecorderClient,
+        xdf_path: Path,
+        initial_size: int,
+    ) -> None:
         if not self.active or self.stopping:
             try:
                 client.stop_recording(xdf_path)
-            except OSError:
+            except Exception:  # noqa: BLE001 - best-effort cleanup after UI cancellation
                 pass
             return
-        self.labrecorder_started = True
-        self._labrecorder_client = client
+        self.recorder_started = True
+        self._recorder_client = client
         assert self.event_log_path is not None
         self.log_handle = self.event_log_path.open("x", encoding="utf-8")
         self.xdf_path = xdf_path
@@ -1086,9 +1161,9 @@ class BSenseExperimentApp:
                 assert self.xdf_path is not None
                 initial_size = LabRecorderClient.wait_for_xdf(self.xdf_path)
             except Exception as error:  # noqa: BLE001 - surfaced to the operator
-                self.root.after(0, lambda error=error: self._prepare_failed(error))
+                self._post_to_ui(lambda error=error: self._prepare_failed(error))
                 return
-            self.root.after(0, lambda: self._manual_xdf_ready(initial_size))
+            self._post_to_ui(lambda: self._manual_xdf_ready(initial_size))
 
         threading.Thread(target=verify_manual, daemon=True).start()
 
@@ -1120,7 +1195,7 @@ class BSenseExperimentApp:
         has_image = self._display_visual(step.visual)
         self.cue_label.configure(
             text=step.text,
-            font=("Microsoft YaHei UI", self._cue_font_size(step.text, has_image), "bold"),
+            font=(UI_FONT_FAMILY, self._cue_font_size(step.text, has_image), "bold"),
         )
         self.detail_label.configure(text=step.detail)
         self.progress_label.configure(text=f"步骤 {self.step_index + 1}/{len(self.plan)}")
@@ -1168,10 +1243,18 @@ class BSenseExperimentApp:
         )
 
     def _play_audio_cue(self, cue: str, step: Step, phase: str) -> None:
-        if not self.audio_enabled.get() or sys.platform != "win32":
+        if not self.audio_enabled.get() or not audio_cues_supported():
             return
-        self._push_step_marker("audio_cue", 700, step, audio_cue=cue, audio_phase=phase)
-        play_windows_audio_cue(cue)
+        self._push_step_marker(
+            "audio_cue",
+            700,
+            step,
+            audio_cue=cue,
+            audio_phase=phase,
+            audio_text=VOICE_CUE_TEXTS[cue],
+            audio_voice=VOICE_CUE_VOICE,
+        )
+        play_audio_cue(cue)
 
     def _on_response_key(self, _event: object) -> None:
         if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
@@ -1263,6 +1346,22 @@ class BSenseExperimentApp:
         now = time.monotonic()
         if self.xdf_path is not None and now - self.last_file_poll >= 1.0:
             self.last_file_poll = now
+            recorder = getattr(self, "_recorder_client", None)
+            if isinstance(recorder, EmbeddedRecorderClient) and (recorder_errors := recorder.errors()):
+                self._push_marker(
+                    {
+                        "code": 13,
+                        "event": "recording_error",
+                        "error": recorder_errors[0],
+                        **self.current_context,
+                        "app_version": APP_VERSION,
+                        "unix_time": time.time(),
+                    }
+                )
+                self.status.set(f"检测到内置录制错误：{recorder_errors[0]}")
+                self._show_saving_state()
+                self._stop_and_return(aborted=True)
+                return
             try:
                 self.xdf_current_size = self.xdf_path.stat().st_size
             except FileNotFoundError:
@@ -1288,7 +1387,7 @@ class BSenseExperimentApp:
     def _finish_experiment(self) -> None:
         if not self.active:
             return
-        if not self.auto_labrecorder.get():
+        if self.recording_mode.get() == RECORDING_MODE_MANUAL:
             self._show_task_action(
                 "请停止手动录制",
                 "在 LabRecorder 中点击 Stop，确认文件已保存后，再点击下方按钮。",
@@ -1313,14 +1412,14 @@ class BSenseExperimentApp:
         self.secondary_button.pack_forget()
         self.abort_button.pack_forget()
         self.quality_frame.pack_forget()
-        self.cue_label.configure(text="正在保存数据", font=("Microsoft YaHei UI", 48, "bold"))
-        self.detail_label.configure(text="请勿关闭 LabRecorder")
+        self.cue_label.configure(text="正在保存数据", font=(UI_FONT_FAMILY, 48, "bold"))
+        self.detail_label.configure(text="正在关闭并验证 XDF，请勿关闭程序")
         self.countdown_label.configure(text="")
 
     def abort_experiment(self) -> None:
         if not self.active or self.stopping:
             return
-        if not messagebox.askyesno("中止实验", "确认中止当前实验并停止 LabRecorder？"):
+        if not messagebox.askyesno("中止实验", "确认中止当前实验并停止录制？"):
             return
         self._push_marker(
             {
@@ -1331,7 +1430,7 @@ class BSenseExperimentApp:
                 "unix_time": time.time(),
             }
         )
-        if not self.auto_labrecorder.get():
+        if self.recording_mode.get() == RECORDING_MODE_MANUAL:
             self._show_task_action(
                 "正在中止模块",
                 "请先在 LabRecorder 中点击 Stop 保存当前数据，再确认继续。",
@@ -1353,20 +1452,20 @@ class BSenseExperimentApp:
         def stop() -> None:
             error: Exception | None = None
             final_size: int | None = None
-            if self.labrecorder_started:
+            if self.recorder_started:
                 try:
-                    final_size = self._labrecorder_client.stop_recording(self.xdf_path)
+                    final_size = self._recorder_client.stop_recording(self.xdf_path)
                 except Exception as caught:  # noqa: BLE001 - surfaced to the operator
                     error = caught
                 finally:
                     if self.recorder_log_path is not None:
-                        self._labrecorder_client.write_diagnostics(self.recorder_log_path)
+                        self._recorder_client.write_diagnostics(self.recorder_log_path)
             elif self.xdf_path is not None:
                 try:
                     final_size = LabRecorderClient.wait_for_xdf(self.xdf_path, timeout=5.0)
                 except Exception as caught:  # noqa: BLE001 - surfaced to the operator
                     error = caught
-            self.root.after(0, lambda: self._stopped(aborted, error, final_size))
+            self._post_to_ui(lambda: self._stopped(aborted, error, final_size))
 
         threading.Thread(target=stop, daemon=True).start()
 
@@ -1376,7 +1475,7 @@ class BSenseExperimentApp:
         completed_title = PROTOCOL_BY_TASK[completed_task].title if completed_task else "当前模块"
         if error is not None:
             self.status.set("实验提示已结束，但 XDF 未通过保存验证")
-        elif not self.auto_labrecorder.get():
+        elif self.recording_mode.get() == RECORDING_MODE_MANUAL:
             self.status.set(f"{completed_title} 已结束，XDF 当前大小 {(final_size or 0) / 1024:.1f} KB")
         elif aborted:
             self.status.set(f"{completed_title} 已中止，XDF 已保存 {(final_size or 0) / 1024:.1f} KB")
@@ -1391,9 +1490,14 @@ class BSenseExperimentApp:
         self.active = False
 
         if error is not None:
+            recovery = (
+                "请检查录制诊断日志。本模块不会被标记为成功。"
+                if self.recording_mode.get() == RECORDING_MODE_EMBEDDED
+                else "请立即查看 LabRecorder，必要时手动点击 Stop。本模块不会被标记为成功。"
+            )
             self._show_task_action(
                 "XDF 未通过保存验证",
-                f"{error}\n\n请立即查看 LabRecorder，必要时手动点击 Stop。本模块不会被标记为成功。",
+                f"{error}\n\n{recovery}",
                 "返回首页检查",
                 self._return_to_setup,
             )
@@ -1438,7 +1542,7 @@ class BSenseExperimentApp:
             self.log_handle.close()
             self.log_handle = None
         self.event_log_path = None
-        self.labrecorder_started = False
+        self.recorder_started = False
         self.xdf_path = None
         self.recorder_log_path = None
         self.current_response_time = None
@@ -1459,11 +1563,14 @@ class BSenseExperimentApp:
 
     def on_close(self) -> None:
         if self.stopping:
-            self.status.set("正在停止 LabRecorder 并验证文件，请稍候，暂时不能关闭。")
+            self.status.set("正在停止录制并验证文件，请稍候，暂时不能关闭。")
             return
         if self.active:
             self.abort_experiment()
             return
+        if self.ui_action_poll_id is not None:
+            self.root.after_cancel(self.ui_action_poll_id)
+            self.ui_action_poll_id = None
         self.root.destroy()
 
 

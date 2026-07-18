@@ -2,7 +2,7 @@
 
 ## 设计原则
 
-采集以“一个模块、一份 XDF”为最小完成单元。首页可单选任一模块，也可多选后按固定顺序执行。当前模块结束时，程序先停止 LabRecorder 并验证文件，再询问是否开始下一个模块。
+采集以“一个模块、一份 XDF”为最小完成单元。首页可单选任一模块，也可多选后按固定顺序执行。当前模块结束时，程序停止内置录制器并验证文件，再询问是否开始下一个模块。
 
 这种结构有三个直接收益：
 
@@ -12,6 +12,19 @@
 
 M0 是正式任务的建议前置，但程序不强制依赖。若跳过 M0，开始前会提示该会话缺少个体基线。
 
+## 设备能力边界
+
+当前范式按 Fp1/Fp2 前额 EEG 与额部 8 通道 fNIRS 的保守能力设计：
+
+- M2 工作记忆负荷和 M3B 持续任务困倦是主要验证方向；
+- M1 左/右手运动想象缺少 C3/C4/Cz 等感觉运动区覆盖，只作为探索性数据，不预设可达到某个分类准确率；
+- Fp1/Fp2 邻近眼睛，眼动、眨眼和额肌活动可能形成比神经信号更强的可分类特征，不能把含伪迹结果解释为运动想象或注意意图；
+- M4A 是“外部提示后的意图”分类，不等价于无提示、自发、异步意图检测；
+- M4B 是串行目标注意的探索性范式。EEG 可做事件相关分析，但 Fp1/Fp2 不是典型 P300 最优位置；fNIRS 只做模块/区块级注意状态分析，不用于判定某一次 1 秒高亮；
+- 程序不硬编码 EEG 或 fNIRS 采样率。分析必须使用 XDF 时间戳计算实测采样率，再按预先登记的方法重采样。
+
+因此，比赛准确率必须通过按被试划分的先导实验和留出测试集报告，不能由范式设计直接推定。
+
 ## 模块与时序
 
 下表中的“自动计时”不包含设备佩戴、人工确认、问卷录入和临时休息。
@@ -19,15 +32,16 @@ M0 是正式任务的建议前置，但程序不强制依赖。若跳过 M0，�
 | 模块 | 自动计时 | 实现摘要 |
 |---|---:|---|
 | 设备 QC | 6.7 分钟 | 睁/闭眼静息及 6 类常见动作/伪迹 |
-| M0 | 5.1 分钟 | 安全确认 → 闭眼 3 分钟 → 睁眼 2 分钟 → 问卷 |
-| M1 | 28.2 分钟 | 4 Run × 30 Trial；每 Run 三类各 10 次并随机打乱 |
-| M2 | 29.3 分钟 | 0/1/2-back 各 3 Block；每 Block 60 个刺激 |
+| M0 | 5.6 分钟 | 安全确认 → 自然呼吸稳定 30 秒 → 闭眼 3 分钟 → 睁眼 2 分钟 → 问卷 |
+| M1 | 28.2 分钟 | 4 Run × 30 Trial；每 Run 三类各 10 次并随机打乱，Run 后评分 |
+| M2 | 29.3 分钟 | 0/1/2-back 各 3 Block；每 Block 60 个刺激及明确恢复边界 |
 | M3A | 4.2 分钟 | 坐姿基线、6 类动作各 5 次、行走基线 |
-| M3B | 10.3 分钟 | 连续 1-back，共 5 个两分钟段，每段后疲劳评分 |
-| M4A | 9.4 分钟 | 有意图/无意图各 40 Trial，顺序随机 |
-| M4B | 10.2 分钟 | 60 轮三物体随机高亮，每轮后休息 4 秒 |
+| M3B | 10.8 分钟 | 分段持续 1-back，共 5 个两分钟段，每段后评分，末尾恢复 30 秒 |
+| M4A | 9.4 分钟 | 外部提示后的有意图/无意图各 40 Trial，顺序随机 |
+| M4B | 8.7 分钟 | 60 轮三物体串行高亮，目标注意而非运动想象 |
+| M5 | 约 5 分钟人工时间 | 结束问卷；自动计时只包含模块边界 |
 
-M1 的方案标称 40 分钟包含设备调整和组间休息等现场时间；程序内自动时序约 28 分钟。每个 Run 三类严格平衡，且不会出现同一条件连续 3 次。启用老年被试节奏后，执行想象延长至 5 秒、试次休息延长至 4 秒、组间休息延长至 5 分钟，自动计时约 37 分钟。
+M0–M5 自动计时合计约 96.3 分钟；加 10 分钟中场休息、M5 及各模块人工评分后，现场应预留约 2 小时。M1 的方案标称 40 分钟包含设备调整和组间休息等现场时间；程序内自动时序约 28 分钟。每个 Run 三类严格平衡，且不会出现同一条件连续 3 次。启用老年被试节奏后，执行想象延长至 5 秒、试次休息延长至 4 秒、组间休息延长至 5 分钟，自动计时约 37 分钟。
 
 ## 交互式标签
 
@@ -47,15 +61,29 @@ M1 的方案标称 40 分钟包含设备调整和组间休息等现场时间；�
 
 不应在 Marker 中录入姓名、药品名称或其他直接身份信息。
 
+M0 的 30 秒稳定段要求自然呼吸，不使用深呼吸作为 HbO/HbR“零点校准”。刻意改变呼吸会引起 CO₂、血压及头皮血流变化，可作为单独的系统生理挑战，但不能替代静息基线或直接用于漂移修正。
+
+### M1 运动想象评分
+
+`mi_cue` 标记准备提示，`mi_left` / `mi_right` / `mi_idle` 精确标记 4 秒有效阶段开始，`mi_trial_end` 标记有效阶段结束。每个 Run 后记录：
+
+- 左手想象成功度、右手想象成功度和空闲态保持程度，均为 1–5；
+- 整体主观努力度，1–5；
+- `rating_scope=run`，明确评分不能当作单试次置信度。
+
+没有采用每 Trial 按键评分：按键本身会产生运动伪迹，而且 fNIRS 的迟发响应会污染后续试次。若未来必须获得单试次评分，应单独验证更长、抖动化的试次间隔。
+
 ### M2/M3B N-Back
 
-目标刺激出现时按空格键。M2 的每个 Block 和 M3B 的完整连续序列均固定 25% 目标刺激，避免随机波动造成类别严重失衡。每个刺激都会生成 `nback_stimulus`，按键时生成 `nback_response`，刺激窗口结束时生成 `nback_trial_result`。结果包含：
+目标刺激出现时按空格键。M2 的每个 Block 和 M3B 的每个两分钟段均固定 25% 目标刺激，避免随机波动造成类别严重失衡。每个刺激都会生成 `nback_stimulus`，按键时生成 `nback_response`，刺激窗口结束时生成 `nback_trial_result`。结果包含：
 
 - `stimulus`、`level`、`is_target`；
 - `responded`、`correct`；
 - `reaction_time_s`，无响应时为 `null`。
 
 M2 每个 Block 结束后记录疲劳、难度以及系统统计的正确数/总数/正确率；M3B 每两分钟记录一次疲劳和对应阶段正确率。
+
+M2 在最后一个刺激后发送 `nback_task_end`，评分后 60 秒恢复段发送 `block_rest` / `block_rest_end`。分析 fNIRS 时应以这些 Marker 定义任务和恢复窗口，不把鼠标操作或问卷时间并入任务激活。
 
 M2 提供两种负荷顺序：
 
@@ -64,19 +92,36 @@ M2 提供两种负荷顺序：
 
 选择拉丁方顺序前，应确保被试已在录制外理解 0/1/2-back 规则，避免直接从高负荷条件开始造成无效数据。
 
+M3B 同时记录标准 1–9 KSS 困倦评分和 1–5 精神疲劳评分，避免把 sleepiness 与 mental fatigue 混为同一构念。每段具有 `fatigue_segment_start` / `fatigue_segment_end`，每个刺激还包含段号、全局位置和段内位置。评分会打断工作记忆，因此每段明确写入 `sequence_reset=true`，并在段内独立保持 25% 目标比例。段内前后反应时变化率应由 `nback_trial_result.reaction_time_s` 离线计算；无响应值不能按 0 ms 处理。为避免每段闭眼造成明显 EEG 条件变化和中断疲劳诱导，只在全部任务结束后采集一次 30 秒睁眼恢复。
+
+### M3A 伪迹样本
+
+动作 Marker 包含 `artifact_expectation=motion_expected` 和 `quality_status=requires_offline_review`。这表示该时间段预期出现运动影响，不代表 EEG 或 fNIRS 必然污染。`eeg_contaminated`、`fnirs_contaminated`、信号质量等级等结果必须由盲法人工审查或预先验证的质量算法产生，不能由动作类别自动写成真值。
+
+### M4A 提示后意图
+
+`intent_cue` 只标记准备提示，`intent_present` / `intent_absent` 标记 4 秒有效阶段开始，`intent_trial_end` 标记结束。每个试次写入 `paradigm=externally_cued_intent`，避免把提示诱发的视觉/认知响应误称为自发异步意图。模块末记录总体意图强度和任务难度。若目标是异步交互协议，必须另设无外部类别提示的连续留出测试；当前训练准确率不能证明异步性能。
+
 ### M4B 目标物体
 
 目标物体在首页选择。正式研究应在被试之间平衡水杯、药瓶和手机作为目标的次数，避免目标身份与图片特征混杂。M4A/M4B 使用 `assets` 中的三张图片；加载失败时回退到大字号物体名称。每个 `target_highlight` Marker 均包含高亮物体、目标物体、轮次、位置以及 `is_target`。
 
 M4A 在有意图和无意图条件内分别平衡三类物体，每类出现次数之差不超过 1，避免某个条件被单一物体图片主导。
 
+M4B 不再要求右手运动想象。三个物体在中央串行出现，目标出现时被试在心中默念“选它”，非目标出现时保持放松，并在刺激之间持续中央注视。Marker 明确写入 `eeg_analysis_scope=event_related_exploratory` 与 `fnirs_analysis_scope=block_level_only`。这不是已验证的 P300 拼写器，也不能仅凭 fNIRS 对单次高亮做目标判定。
+
+### M5 结束问卷
+
+M5 记录整体 KSS、运动想象难度（未执行 M1 时可选“不适用”）、最容易/最困难任务、设备舒适度，以及头痛、眩晕/恶心、皮肤/压迫不适。M5 是独立模块并保存独立 XDF/Marker，便于中途终止时审计；若被试报告明显不适，应按伦理和安全流程处理，不应用问卷结果简单“筛除”数据。
+
 ## 视觉与声音提示
 
 - 单字符、箭头和注视十字使用约 108 pt 字号；
 - 物体图片最长边为 420 px，并同时显示大字号物体名称；
 - 倒计时使用 36 pt 粗体，指导语使用 22 pt；
-- 长闭眼静息结束前、长组间休息结束前和模块完成时可播放 Windows 扬声器提示音；
-- 每次实际播放均写入编码 700 的 `audio_cue` Marker。
+- 长闭眼静息结束前、长组间休息结束前和模块完成时可播放离线中文女声提示；
+- 提示语使用缓存的 `zh-CN-XiaoxiaoNeural` WAV，不在实验期间调用网络；
+- 每次实际播放均写入编码 700 的 `audio_cue` Marker，并包含 `audio_text` 与 `audio_voice`。
 
 提示音只安排在过渡边界，不在运动想象或 N-Back 有效刺激窗口中播放。听觉提示仍会引起 EEG 反应；若研究方案需要纯视觉范式，应在首页关闭提示音，并在所有被试中保持一致。
 
@@ -109,9 +154,19 @@ sub-pilot01_ses-01_task-m2_nback_run-001.xdf
 ## 正式采集前检查
 
 1. 先用 `deviceqc` 短流程验证 8 条 LSL 流和 XDF 保存。
-2. 使用“自动扫描 LSL 数据流”确认六类数值流齐全，并在 LabRecorder 中确认 BioMultiLite Marker。
+2. 使用“自动扫描 LSL 数据流”确认六类数值流齐全；内置录制开始时会再次发现全部可见流并检查实验 Marker。
 3. M1、M2、M4A、M4B 在正式录制前完成独立指导与练习，并在首页确认；练习数据不要混入正式 Run。
 4. 正式采集取消“短流程”。短流程只验证交互和 Marker，不作为训练数据。
 5. M3A 必须使用稳定、有靠背的座椅，实验员全程保护；任何不适立即按 `Esc` 中止。
 6. 不同被试保持一致的设备位置、指导语、目标物体规则、提示音设置和软件版本。
 7. 数据清洗时按 `task`、`block`、`trial` 和 `protocol_seed` 审计标签，不按固定样本数重建时间轴。
+8. 先完成小样本可行性试验并冻结分析方案；模型评估按被试划分训练/验证/测试集，禁止把同一被试的相邻窗口随机分到不同集合。
+
+## 设计依据
+
+- 准备电位的早期成分主要分布于中央/顶区并在头皮顶点最强，晚期成分也以中央区为主：[Electrophysiological evidence of functional integration between the language and motor systems in the brain](https://pmc.ncbi.nlm.nih.gov/articles/PMC4793185/)；
+- 运动想象 fNIRS 研究通常覆盖初级/次级感觉运动区，而不是只依赖额部通道：[Testing the potential of a virtual reality neurorehabilitation system](https://pmc.ncbi.nlm.nih.gov/articles/PMC3014953/)；
+- P300 BCI 的主要能量通常在 Cz、Pz、PO7、PO8 等中央-顶枕位置采集：[A novel P300-based brain-computer interface stimulus presentation paradigm](https://pmc.ncbi.nlm.nih.gov/articles/PMC2879474/)；
+- 额部 8 通道 fNIRS 对 N-back 负荷具有已有实证基础，但公开研究的准确率不能直接外推到本设备、被试或数据划分：[Mental workload during n-back task—quantified in the prefrontal cortex using fNIRS](https://pmc.ncbi.nlm.nih.gov/articles/PMC3893598/)；
+- KSS 是 1–9 级瞬时困倦量表，并已与 EEG/行为指标做过验证：[Validation of the Karolinska sleepiness scale against performance and EEG variables](https://pubmed.ncbi.nlm.nih.gov/16679057/)；
+- 额部 fNIRS 对呼吸、血压、头皮血流及任务诱发的系统生理变化敏感：[The physiological origin of task-evoked systemic artefacts in functional near infrared spectroscopy](https://pmc.ncbi.nlm.nih.gov/articles/PMC3348501/)。
