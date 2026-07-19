@@ -13,12 +13,16 @@ from pathlib import Path
 
 AUDIO_PATTERNS = {
     "start": ((880, 130),),
+    "close_eyes": ((740, 160), (0, 100), (740, 160)),
+    "rest_start": ((784, 130), (0, 100), (784, 130)),
     "ending_soon": ((740, 100), (0, 90), (740, 100)),
     "open_eyes": ((880, 120), (0, 80), (1047, 180)),
     "complete": ((784, 120), (0, 70), (988, 120), (0, 70), (1175, 220)),
 }
 VOICE_CUE_TEXTS = {
     "start": "请准备。",
+    "close_eyes": "请轻轻闭上眼睛。",
+    "rest_start": "现在开始休息。",
     "ending_soon": "本阶段即将结束。",
     "open_eyes": "请缓慢睁开眼睛。",
     "complete": "本模块已完成。",

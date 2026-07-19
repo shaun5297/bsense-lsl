@@ -8,6 +8,7 @@ code,event_name,task,description
 101,rest_open_end,deviceqc|m0_baseline,睁眼静息结束
 110,rest_closed_start,deviceqc|m0_baseline,闭眼静息开始
 111,rest_closed_end,deviceqc|m0_baseline,闭眼静息结束
+112,rest_closed_prepare,deviceqc|m0_baseline,闭眼静息准备提示
 120,blink_start,deviceqc,自然眨眼条件开始
 121,blink_end,deviceqc,自然眨眼条件结束
 130,jaw_start,deviceqc,咬紧条件开始
@@ -24,6 +25,9 @@ code,event_name,task,description
 304,mi_run_rating,m1_mi,运动想象Run级评分提交
 305,mi_cue,m1_mi,运动想象准备提示
 306,mi_trial_end,m1_mi,运动想象有效阶段结束
+307,mi_guided_practice_start,m1_mi,运动想象引导练习开始
+308,mi_guided_practice_complete,m1_mi,运动想象引导练习完成
+309,mi_formal_start,m1_mi,运动想象正式采集准备
 310,inter_run_rest,m1_mi,运动想象组间休息
 400,baseline_preparation_start,m0_baseline,基线设备与安全检查开始
 401,baseline_preparation_complete,m0_baseline,基线设备与安全检查完成
@@ -31,6 +35,10 @@ code,event_name,task,description
 403,baseline_settle_end,m0_baseline,自然呼吸稳定段结束
 410,baseline_questionnaire_start,m0_baseline,基线问卷开始
 411,baseline_questionnaire,m0_baseline,基线问卷提交
+415,nback_pre_rest_start,m2_nback,M2开始前安静恢复开始
+416,nback_pre_rest_end,m2_nback,M2开始前安静恢复结束
+417,nback_precheck_start,m2_nback,M2开始前状态确认开始
+418,nback_precheck,m2_nback,M2开始前状态确认提交
 420,block_start,m2_nback,0-back区块开始
 421,nback_stimulus,m2_nback,0-back刺激出现
 430,block_start,m2_nback,1-back区块开始
@@ -79,3 +87,4 @@ code,event_name,task,description
 900,trial_invalid,all,操作员标记当前试次无效
 901,device_adjustment,all,采集中调整设备
 902,bluetooth_interruption,all,蓝牙或数据流中断
+903,mi_motion_warning,m1_mi,运动想象有效阶段检测到明显动作候选

@@ -1,13 +1,23 @@
 import threading
+import time
 import unittest
 from queue import SimpleQueue
 
-from bsense_experiment.app import BSenseExperimentApp
+from bsense_experiment.app import (
+    BSenseExperimentApp,
+    eeg_clipped_channel_count,
+    flat_channel_count,
+    motion_activity_metrics,
+)
+from bsense_experiment.live import DataWindow, StreamDescriptor
+from bsense_experiment.protocols import Step
 
 
 class FakeRoot:
     def __init__(self) -> None:
         self.after_threads: list[int] = []
+        self.idle_callbacks: list[object] = []
+        self.cancelled: list[str] = []
         self.exists = True
 
     def after(self, _milliseconds: int, _callback: object) -> str:
@@ -16,6 +26,21 @@ class FakeRoot:
 
     def winfo_exists(self) -> bool:
         return self.exists
+
+    def after_idle(self, callback: object) -> str:
+        self.idle_callbacks.append(callback)
+        return "idle-1"
+
+    def after_cancel(self, callback_id: str) -> None:
+        self.cancelled.append(callback_id)
+
+
+class FakeLabel:
+    def __init__(self) -> None:
+        self.options: dict[str, object] = {}
+
+    def configure(self, **options: object) -> None:
+        self.options.update(options)
 
 
 class AppAsyncTests(unittest.TestCase):
@@ -36,6 +61,117 @@ class AppAsyncTests(unittest.TestCase):
         self.assertEqual(callback_threads, [main_thread])
         self.assertEqual(app.root.after_threads, [main_thread])
         self.assertEqual(app.ui_action_poll_id, "poll-1")
+
+    def test_flat_channel_count_only_flags_constant_finite_channels(self) -> None:
+        descriptor = StreamDescriptor("eeg", "EEG", "EEG", 2, 25.0, ("Fp1", "Fp2"), "source")
+        window = DataWindow(
+            descriptor,
+            tuple(index / 25.0 for index in range(5)),
+            ((1.0, 1.0), (1.0, 2.0), (1.0, 3.0), (1.0, 4.0), (1.0, 5.0)),
+            5,
+            None,
+        )
+        self.assertEqual(flat_channel_count(window), 1)
+
+    def test_eeg_clipping_flags_a_channel_near_the_bsense_rail(self) -> None:
+        descriptor = StreamDescriptor("eeg", "EEG", "EEG", 2, 250.0, ("Fp1", "Fp2"), "source")
+        samples = tuple(
+            (-375000.0 if index < 32 else -374500.0 + index, float(index)) for index in range(40)
+        )
+        window = DataWindow(descriptor, tuple(index / 250.0 for index in range(40)), samples, 40, None)
+
+        self.assertEqual(eeg_clipped_channel_count(window), 1)
+
+    def test_motion_activity_metrics_marks_large_gyro_span_for_review(self) -> None:
+        descriptor = StreamDescriptor(
+            "motion",
+            "Motion",
+            "Motion",
+            6,
+            25.0,
+            ("ax", "ay", "az", "gx", "gy", "gz"),
+            "source",
+        )
+        samples = tuple((0.0, 0.0, 1.0, float(index), 0.0, 0.0) for index in range(8))
+        window = DataWindow(descriptor, tuple(index / 25.0 for index in range(8)), samples, 8, None)
+
+        warning, acceleration_span, gyroscope_span = motion_activity_metrics(window)
+
+        self.assertTrue(warning)
+        self.assertEqual(acceleration_span, 0.0)
+        self.assertEqual(gyroscope_span, 7.0)
+
+    def test_nback_feedback_marks_and_colors_a_false_alarm(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.plan = [Step("B", "", 2.0, response_key="space", metadata={"is_target": False})]
+        app.current_response_time = None
+        app.current_context = {"nback_feedback_enabled": True}
+        app.step_started = time.monotonic()
+        app.step_text_replaced = False
+        app.cue_label = FakeLabel()
+        marker_extras: dict[str, object] = {}
+
+        def capture_marker(_event: str, _code: int, _step: Step, **extras: object) -> None:
+            marker_extras.update(extras)
+
+        app._push_step_marker = capture_marker
+        result = app._on_response_key(None)
+
+        self.assertEqual(app.cue_label.options["text"], "✕ 错误")
+        self.assertFalse(marker_extras["correct"])
+        self.assertTrue(marker_extras["feedback_shown"])
+        self.assertTrue(app.step_text_replaced)
+        self.assertEqual(result, "break")
+
+    def test_manual_completion_cannot_advance_a_timed_nback_step(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.step_generation = 1
+        app.step_completion_started = False
+        app.plan = [Step("B", "", 2.0, response_key="space")]
+        completions: list[dict[str, object]] = []
+        app._complete_current_step = lambda **values: completions.append(values)
+
+        app._complete_manual_step()
+
+        self.assertEqual(completions, [])
+
+    def test_step_completion_is_idempotent(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.root = FakeRoot()
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.step_generation = 7
+        app.step_completion_started = False
+        app.plan = [Step("完成", "", 0.0, completion_event="done", completion_code=99)]
+        markers: list[str] = []
+        app._push_step_marker = lambda event, _code, _step, **_values: markers.append(event)
+
+        app._complete_current_step(expected_generation=7, expected_step_index=0)
+        app._complete_current_step(expected_generation=7, expected_step_index=0)
+
+        self.assertEqual(markers, ["done"])
+        self.assertEqual(len(app.root.idle_callbacks), 1)
+
+    def test_stale_tick_cannot_touch_the_new_step(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.step_generation = 3
+        app.step_completion_started = False
+        app.tick_id = "new-step-timer"
+        app.plan = [Step("+", "", 10.0)]
+
+        app._tick_step(generation=2, step_index=0)
+
+        self.assertEqual(app.tick_id, "new-step-timer")
 
 
 if __name__ == "__main__":

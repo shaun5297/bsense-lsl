@@ -84,6 +84,27 @@ class FakeInlet:
         return None
 
 
+class FlakyOffsetInlet(FakeInlet):
+    def __init__(self, info: StreamInfo) -> None:
+        super().__init__(info)
+        self._offset_calls = 0
+
+    def time_correction(self, timeout: float) -> float:
+        del timeout
+        self._offset_calls += 1
+        if self._offset_calls == 1:
+            raise RuntimeError("temporary timeout")
+        return 0.001
+
+
+class InvertingTimestampInlet(FakeInlet):
+    def pull_chunk(self, timeout: float, max_samples: int) -> tuple[list[list[object]], list[float]]:
+        samples, timestamps = super().pull_chunk(timeout, max_samples)
+        if samples and self._info.channel_format() != cf_string:
+            return samples, [10.0, 9.99]
+        return samples, timestamps
+
+
 class XDFWriterTests(unittest.TestCase):
     def test_varlen_integer_boundaries(self) -> None:
         self.assertEqual(encode_varlen_int(255), b"\x01\xff")
@@ -136,6 +157,48 @@ class XDFWriterTests(unittest.TestCase):
             self.assertIn(BOUNDARY, tags)
             self.assertTrue(any(record["event"] == "recording_started" for record in client.diagnostics))
             self.assertTrue(any(record["event"] == "recording_stopped" for record in client.diagnostics))
+
+    def test_embedded_recorder_retries_clock_offsets_and_reports_recovery(self) -> None:
+        marker = StreamInfo("BSense Experiment Markers", "Markers", 1, 0.0, cf_string, "marker-source")
+        eeg = StreamInfo("BioMultiLite EEG", "EEG", 2, 100.0, cf_float32, "eeg-source")
+        with tempfile.TemporaryDirectory() as directory:
+            client = EmbeddedRecorderClient(
+                resolver=lambda _timeout: (marker, eeg),
+                inlet_factory=FlakyOffsetInlet,
+                require_biomultilite_streams=False,
+                offset_interval=0.01,
+                offset_retry_interval=0.005,
+            )
+            path, _ = client.start_recording(Path(directory), "clock-retry.xdf")
+            time.sleep(0.06)
+            client.stop_recording(path)
+
+        recovered = [record for record in client.diagnostics if record["event"] == "clock_offset_recovered"]
+        self.assertEqual(len(recovered), 2)
+        closed = [record for record in client.diagnostics if record["event"] == "stream_closed"]
+        self.assertTrue(all(record["clock_offset_count"] >= 1 for record in closed))
+        self.assertTrue(all(record["clock_offset_failures"] == 1 for record in closed))
+
+    def test_embedded_recorder_reports_raw_timestamp_inversions(self) -> None:
+        marker = StreamInfo("BSense Experiment Markers", "Markers", 1, 0.0, cf_string, "marker-source")
+        eeg = StreamInfo("BioMultiLite EEG", "EEG", 2, 100.0, cf_float32, "eeg-source")
+        with tempfile.TemporaryDirectory() as directory:
+            client = EmbeddedRecorderClient(
+                resolver=lambda _timeout: (marker, eeg),
+                inlet_factory=InvertingTimestampInlet,
+                require_biomultilite_streams=False,
+                offset_interval=0.01,
+            )
+            path, _ = client.start_recording(Path(directory), "timestamp-inversion.xdf")
+            time.sleep(0.03)
+            client.stop_recording(path)
+
+        eeg_closed = next(
+            record
+            for record in client.diagnostics
+            if record["event"] == "stream_closed" and record["name"] == "BioMultiLite EEG"
+        )
+        self.assertEqual(eeg_closed["timestamp_inversions"], 1)
 
     def test_embedded_recorder_requires_experiment_marker(self) -> None:
         eeg = StreamInfo("BioMultiLite EEG", "EEG", 2, 100.0, cf_float32, "eeg-source")

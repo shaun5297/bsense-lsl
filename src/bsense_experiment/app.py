@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import socket
 import sys
@@ -35,7 +36,7 @@ from .platform_support import (
     play_audio_cue,
     ui_font_family,
 )
-from .live import STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, describe_stream
+from .live import DataWindow, LiveStreamManager, STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, describe_stream
 from .protocols import (
     PROTOCOLS,
     PROTOCOL_BY_TASK,
@@ -66,6 +67,70 @@ OBJECT_ASSETS = {
     "手机": "mobilephone.png",
     "药瓶": "medicinebottle.png",
 }
+TASK_SIGNAL_KINDS = ("eeg", "fnirs", "motion")
+BSENSE_EEG_RAIL_ABS = 375_000.0
+BSENSE_EEG_RAIL_TOLERANCE = 1_000.0
+MI_ACCEL_SPAN_WARNING = 0.08
+MI_GYRO_SPAN_WARNING = 5.0
+
+
+def flat_channel_count(window: DataWindow) -> int:
+    """Count channels that are finite but exactly constant in the visible window."""
+
+    if len(window.samples) < 5:
+        return 0
+    flat_count = 0
+    for channel_index in range(window.descriptor.channel_count):
+        values = [
+            row[channel_index]
+            for row in window.samples
+            if channel_index < len(row) and math.isfinite(row[channel_index])
+        ]
+        if len(values) >= 5 and max(values) - min(values) <= 1e-12:
+            flat_count += 1
+    return flat_count
+
+
+def eeg_clipped_channel_count(window: DataWindow) -> int:
+    """Count EEG channels stuck near the BSense rail or on an extreme plateau."""
+
+    if len(window.samples) < 20:
+        return 0
+    clipped = 0
+    for channel_index in range(window.descriptor.channel_count):
+        values = [
+            row[channel_index]
+            for row in window.samples
+            if channel_index < len(row) and math.isfinite(row[channel_index])
+        ]
+        if len(values) < 20 or max(values) - min(values) <= 1e-12:
+            continue
+        near_rail = sum(
+            abs(abs(value) - BSENSE_EEG_RAIL_ABS) <= BSENSE_EEG_RAIL_TOLERANCE for value in values
+        )
+        extrema_plateau = max(values.count(min(values)), values.count(max(values)))
+        if near_rail / len(values) >= 0.05 or extrema_plateau / len(values) >= 0.20:
+            clipped += 1
+    return clipped
+
+
+def motion_activity_metrics(window: DataWindow) -> tuple[bool, float, float]:
+    """Return a conservative MI movement warning and acceleration/gyro spans."""
+
+    if window.descriptor.channel_count < 6 or len(window.samples) < 8:
+        return False, 0.0, 0.0
+    spans: list[float] = []
+    for channel_index in range(6):
+        values = [
+            row[channel_index]
+            for row in window.samples
+            if channel_index < len(row) and math.isfinite(row[channel_index])
+        ]
+        spans.append(max(values) - min(values) if len(values) >= 8 else 0.0)
+    accel_span = max(spans[:3])
+    gyro_span = max(spans[3:6])
+    warning = accel_span >= MI_ACCEL_SPAN_WARNING or gyro_span >= MI_GYRO_SPAN_WARNING
+    return warning, accel_span, gyro_span
 
 
 def validate_identifier(value: str, field_name: str) -> str:
@@ -198,8 +263,8 @@ class BSenseExperimentApp:
     def __init__(self, root: Tk, default_short: bool = False) -> None:
         self.root = root
         self.root.title("BSense-R 实验控制")
-        self.root.geometry("1040x790")
-        self.root.minsize(900, 790)
+        self.root.geometry("1040x800")
+        self.root.minsize(900, 800)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<Escape>", lambda _event: self.abort_experiment())
         self.root.bind("<KeyPress-space>", self._on_response_key)
@@ -219,6 +284,7 @@ class BSenseExperimentApp:
         self.older_adult = BooleanVar(value=False)
         self.recording_mode = StringVar(value=RECORDING_MODE_EMBEDDED)
         self.audio_enabled = BooleanVar(value=True)
+        self.nback_feedback = BooleanVar(value=False)
         self.target_object = StringVar(value="水杯")
         self.nback_order = StringVar(value="由易到难（原方案）")
         self.consent_confirmed = BooleanVar(value=False)
@@ -231,6 +297,7 @@ class BSenseExperimentApp:
         self.selection_warning = StringVar(value="")
         self.setup_error = StringVar(value="")
         self.stream_check_status = StringVar(value="尚未自动扫描 LSL 数据流")
+        self.task_signal_status = StringVar(value="信号状态：正在扫描 EEG、fNIRS、Motion……")
         self.module_vars = {
             protocol.task: BooleanVar(value=(protocol.task == ("deviceqc" if default_short else "m0_baseline")))
             for protocol in PROTOCOLS
@@ -255,6 +322,9 @@ class BSenseExperimentApp:
         self.step_index = -1
         self.step_started = 0.0
         self.tick_id: str | None = None
+        self.pending_advance_id: str | None = None
+        self.step_generation = 0
+        self.step_completion_started = False
         self.log_handle = None
         self.event_log_path: Path | None = None
         self.current_context: dict[str, object] = {}
@@ -264,11 +334,13 @@ class BSenseExperimentApp:
         self.module_index = -1
         self.current_task = ""
         self.current_response_time: float | None = None
+        self.step_text_replaced = False
         self.block_results: dict[str, list[bool]] = {}
         self.form_variables: dict[str, StringVar] = {}
         self.form_error = StringVar(value="")
         self.object_images: dict[str, PhotoImage] = {}
         self.audio_warning_played = False
+        self.motion_warning_generation: int | None = None
         self.pending_next_task: str | None = None
         self.recorder_started = False
         self.xdf_path: Path | None = None
@@ -279,10 +351,14 @@ class BSenseExperimentApp:
         self.live_monitor: LiveMonitorWindow | None = None
         self.ui_actions: SimpleQueue[Callable[[], None]] = SimpleQueue()
         self.ui_action_poll_id: str | None = None
+        self.task_signal_manager = LiveStreamManager(buffer_seconds=10.0)
+        self.task_signal_poll_id: str | None = None
 
         self._build_setup_view()
         self._build_task_view()
         self.task_frame.pack_forget()
+        self.task_signal_manager.start()
+        self.task_signal_poll_id = self.root.after(500, self._update_task_signal_status)
         self.ui_action_poll_id = self.root.after(50, self._poll_ui_actions)
 
     def _post_to_ui(self, action: Callable[[], None]) -> None:
@@ -450,7 +526,12 @@ class BSenseExperimentApp:
         )
         nback_combobox.grid(row=3, column=1, sticky="w", pady=6)
         nback_combobox.bind("<<ComboboxSelected>>", self._practice_config_changed)
-        ttk.Label(module_tab, text="拉丁方模式开始前必须完成 0/1/2-back 练习", foreground="#7a4b00").grid(
+        ttk.Checkbutton(
+            module_tab,
+            text="按键正误颜色（仅练习；正式关闭）",
+            variable=self.nback_feedback,
+            command=self._practice_config_changed,
+        ).grid(
             row=3,
             column=2,
             columnspan=2,
@@ -589,8 +670,9 @@ class BSenseExperimentApp:
         self.practice_ready.set(False)
         self._update_estimate()
 
-    def _practice_config_changed(self, _event: object) -> None:
+    def _practice_config_changed(self, _event: object | None = None) -> None:
         self.practice_ready.set(False)
+        self._update_estimate()
 
     def _update_estimate(self) -> None:
         selected = self._selected_modules()
@@ -616,7 +698,18 @@ class BSenseExperimentApp:
         self.estimate_text.set(f"已选 {len(selected)} 个模块，自动计时约 {seconds / 60:.1f} 分钟{manual_note}")
         physiological_tasks = {task for task in selected if task not in {"deviceqc", "m0_baseline", "m5_debrief"}}
         missing_baseline = "m0_baseline" not in selected and bool(physiological_tasks)
-        self.selection_warning.set("提示：未选择 M0，本会话正式任务将缺少个体基线。" if missing_baseline else "")
+        warnings: list[str] = []
+        if missing_baseline:
+            warnings.append("提示：未选择 M0，本会话正式任务将缺少个体基线。")
+        if "m2_nback" in selected and self.nback_feedback.get() and not self.short_protocol.get():
+            warnings.append("提示：正式 M2 已启用正误颜色反馈；这会改变视觉刺激与任务策略，建议关闭。")
+        if (
+            "m2_nback" in selected
+            and self.nback_order.get().startswith("由易到难")
+            and not self.short_protocol.get()
+        ):
+            warnings.append("提示：M2 由易到难会把负荷等级与时间/疲劳混杂；正式组间比较建议改用拉丁方平衡。")
+        self.selection_warning.set("；".join(warnings))
 
     def open_live_monitor(self) -> None:
         monitor = self.live_monitor
@@ -663,8 +756,8 @@ class BSenseExperimentApp:
         if not self.audio_enabled.get():
             self.stream_check_status.set("请先勾选“启用中文女声过渡提示”。")
             return
-        play_audio_cue("open_eyes")
-        self.stream_check_status.set("已播放中文女声试听；请确认音量舒适且被试能够听见。")
+        play_audio_cue("close_eyes")
+        self.stream_check_status.set("已播放闭眼中文女声试听；请确认音量舒适且被试能够听见。")
 
     def _lsl_scan_finished(self, found: set[str], error: Exception | None) -> None:
         self.scan_streams_button.configure(state="normal")
@@ -684,8 +777,23 @@ class BSenseExperimentApp:
 
     def _build_task_view(self) -> None:
         self.task_frame = ttk.Frame(self.root, padding=28)
+        style = ttk.Style(self.root)
+        style.configure("Task.TButton", font=(UI_FONT_FAMILY, 16, "bold"), padding=(20, 14))
+        style.configure("Quality.TButton", font=(UI_FONT_FAMILY, 14, "bold"), padding=(16, 12))
         self.progress_label = ttk.Label(self.task_frame, text="", font=(UI_FONT_FAMILY, 14))
         self.progress_label.pack(anchor="nw")
+        self.task_signal_label = ttk.Label(
+            self.task_frame,
+            textvariable=self.task_signal_status,
+            font=(UI_FONT_FAMILY, 13, "bold"),
+        )
+        self.task_signal_label.pack(anchor="nw", pady=(5, 0))
+        ttk.Label(
+            self.task_frame,
+            text="状态条检查断流、采样率、恒定通道与 EEG 削顶；M1 检测到明显动作时会自动写入复核标记。",
+            font=(UI_FONT_FAMILY, 10),
+            foreground="#666666",
+        ).pack(anchor="nw", pady=(2, 0))
         ttk.Separator(self.task_frame).pack(fill="x", pady=12)
 
         self.task_content = ttk.Frame(self.task_frame)
@@ -702,6 +810,7 @@ class BSenseExperimentApp:
             wraplength=1100,
         )
         self.cue_label.grid(row=1, column=0, sticky="nsew", pady=4)
+        self.default_cue_foreground = self.cue_label.cget("foreground")
         self.detail_label = ttk.Label(
             self.task_content,
             text="",
@@ -734,22 +843,116 @@ class BSenseExperimentApp:
             ttk.Button(
                 self.quality_frame,
                 text=label,
+                style="Quality.TButton",
                 takefocus=False,
                 command=lambda event=event, code=code: self._send_quality_marker(event, code),
-            ).pack(side="left", padx=(0, 10))
+            ).pack(side="left", fill="x", expand=True, padx=(0, 10))
+        ttk.Button(
+            self.quality_frame,
+            text="查看实时波形",
+            style="Quality.TButton",
+            takefocus=False,
+            command=self.open_live_monitor,
+        ).pack(side="left", fill="x", expand=True)
         self.quality_frame.pack_forget()
 
         self.button_frame = ttk.Frame(self.task_frame)
         self.button_frame.pack(fill="x", pady=(10, 0))
-        self.action_button = ttk.Button(self.button_frame, text="继续", command=self._complete_manual_step)
+        self.action_button = ttk.Button(
+            self.button_frame,
+            text="继续",
+            style="Task.TButton",
+            takefocus=False,
+            command=self._complete_manual_step,
+        )
         self.action_button.pack(side="left")
         self.action_button.pack_forget()
-        self.secondary_button = ttk.Button(self.button_frame, text="返回首页", command=self._return_to_setup)
+        self.secondary_button = ttk.Button(
+            self.button_frame,
+            text="返回首页",
+            style="Task.TButton",
+            takefocus=False,
+            command=self._return_to_setup,
+        )
         self.secondary_button.pack(side="left", padx=(12, 0))
         self.secondary_button.pack_forget()
-        self.abort_button = ttk.Button(self.button_frame, text="中止实验 (Esc)", command=self.abort_experiment)
+        self.abort_button = ttk.Button(
+            self.button_frame,
+            text="中止实验 (Esc)",
+            style="Task.TButton",
+            takefocus=False,
+            command=self.abort_experiment,
+        )
         self.abort_button.pack(side="right")
         self._load_object_images()
+
+    def _update_task_signal_status(self) -> None:
+        self.task_signal_poll_id = None
+        parts: list[str] = []
+        has_error = False
+        waiting = False
+        motion_warning: tuple[Step, float, float] | None = None
+        manager_errors = self.task_signal_manager.errors()
+        for kind in TASK_SIGNAL_KINDS:
+            label = STREAM_KIND_LABELS[kind]
+            window = self.task_signal_manager.window(kind, 3.0, max_points=240)
+            if window is None or len(window.samples) < 2:
+                parts.append(f"{label} ○等待")
+                waiting = True
+                continue
+            if not window.is_live:
+                parts.append(f"{label} ✕中断")
+                has_error = True
+                continue
+            rate = window.observed_srate
+            rate_text = f"{rate:.1f}Hz" if rate is not None else "已连接"
+            flat_count = flat_channel_count(window)
+            if flat_count:
+                parts.append(f"{label} !恒定{flat_count}ch/{rate_text}")
+                has_error = True
+            elif kind == "eeg" and (clipped_count := eeg_clipped_channel_count(window)):
+                parts.append(f"{label} !削顶{clipped_count}ch/{rate_text}")
+                has_error = True
+            elif (
+                kind == "motion"
+                and self.active
+                and not self.stopping
+                and 0 <= self.step_index < len(self.plan)
+                and self.plan[self.step_index].event in {"mi_left", "mi_right", "mi_idle"}
+                and time.monotonic() - self.step_started >= 0.5
+            ):
+                recent_motion = self.task_signal_manager.window("motion", 0.75, max_points=100)
+                detected, accel_span, gyro_span = (
+                    motion_activity_metrics(recent_motion) if recent_motion is not None else (False, 0.0, 0.0)
+                )
+                if detected:
+                    parts.append(f"{label} !M1动作/{rate_text}")
+                    has_error = True
+                    motion_warning = (self.plan[self.step_index], accel_span, gyro_span)
+                else:
+                    parts.append(f"{label} ●{rate_text}")
+            else:
+                parts.append(f"{label} ●{rate_text}")
+        if manager_errors:
+            has_error = True
+            parts.append("采集器 !异常")
+        self.task_signal_status.set("信号状态：" + "  |  ".join(parts))
+        foreground = "#b42318" if has_error else "#9a6700" if waiting else "#14804a"
+        self.task_signal_label.configure(foreground=foreground)
+        if motion_warning is not None and self.motion_warning_generation != self.step_generation:
+            step, accel_span, gyro_span = motion_warning
+            self.motion_warning_generation = self.step_generation
+            self._push_step_marker(
+                "mi_motion_warning",
+                903,
+                step,
+                acceleration_span=round(accel_span, 6),
+                gyroscope_span=round(gyro_span, 6),
+                quality_status="requires_offline_review",
+                invalidates_trial=False,
+            )
+        if self.root.winfo_exists():
+            self.task_signal_poll_id = self.root.after(500, self._update_task_signal_status)
 
     def _load_object_images(self) -> None:
         asset_root = Path(__file__).resolve().parents[2] / "assets"
@@ -853,10 +1056,14 @@ class BSenseExperimentApp:
     ) -> None:
         self._hide_inline_form()
         self._display_visual(None)
-        self.cue_label.configure(text=title, font=(UI_FONT_FAMILY, 48, "bold"))
+        self.cue_label.configure(
+            text=title,
+            font=(UI_FONT_FAMILY, 48, "bold"),
+            foreground=self.default_cue_foreground,
+        )
         self.detail_label.configure(text=detail)
         self.countdown_label.configure(text="")
-        self.action_button.configure(text=primary_text, command=primary_command)
+        self.action_button.configure(text=primary_text, command=primary_command, state="normal")
         self.action_button.pack(side="left")
         if secondary_text is not None and secondary_command is not None:
             self.secondary_button.configure(text=secondary_text, command=secondary_command)
@@ -1033,6 +1240,7 @@ class BSenseExperimentApp:
         nback_order = "counterbalanced" if self.nback_order.get().startswith("拉丁方") else "ascending"
         if task == "m2_nback":
             self.current_context["nback_order"] = nback_order
+            self.current_context["nback_feedback_enabled"] = self.nback_feedback.get()
         self.plan = build_protocol_plan(
             task,
             short=self.short_protocol.get(),
@@ -1055,7 +1263,7 @@ class BSenseExperimentApp:
         self.setup_frame.pack_forget()
         self.task_frame.pack(fill="both", expand=True)
         self.root.attributes("-fullscreen", True)
-        self.cue_label.configure(text="正在准备录制")
+        self.cue_label.configure(text="正在准备录制", foreground=self.default_cue_foreground)
         self.detail_label.configure(
             text=f"{PROTOCOL_BY_TASK[task].title}（{self.module_index + 1}/{len(self.module_queue)}）\n"
             "正在订阅 LSL 流并创建 XDF 文件"
@@ -1182,6 +1390,8 @@ class BSenseExperimentApp:
     def _advance_step(self) -> None:
         if not self.active or self.stopping:
             return
+        self.step_generation += 1
+        self.step_completion_started = False
         self.step_index += 1
         if self.step_index >= len(self.plan):
             self._finish_experiment()
@@ -1190,16 +1400,19 @@ class BSenseExperimentApp:
         step = self.plan[self.step_index]
         self.step_started = time.monotonic()
         self.current_response_time = None
+        self.step_text_replaced = False
         self.audio_warning_played = False
         self._hide_inline_form()
         has_image = self._display_visual(step.visual)
         self.cue_label.configure(
             text=step.text,
             font=(UI_FONT_FAMILY, self._cue_font_size(step.text, has_image), "bold"),
+            foreground=self.default_cue_foreground,
         )
         self.detail_label.configure(text=step.detail)
         self.progress_label.configure(text=f"步骤 {self.step_index + 1}/{len(self.plan)}")
         self.action_button.pack_forget()
+        self.action_button.configure(state="disabled")
         self.secondary_button.pack_forget()
         self.abort_button.pack(side="right")
         self.quality_frame.pack(before=self.button_frame, fill="x", pady=(4, 0))
@@ -1208,7 +1421,8 @@ class BSenseExperimentApp:
         if step.start_sound is not None:
             self._play_audio_cue(step.start_sound, step, "start")
         if step.advance == "timed":
-            self._tick_step()
+            self.task_frame.focus_set()
+            self._tick_step(self.step_generation, self.step_index)
             return
         if step.advance == "form":
             self._show_inline_form(step)
@@ -1218,6 +1432,7 @@ class BSenseExperimentApp:
         self.action_button.configure(
             text="提交表单并继续" if step.advance == "form" else "已完成，继续",
             command=self._complete_manual_step,
+            state="normal",
         )
         self.action_button.pack(side="left")
 
@@ -1256,29 +1471,55 @@ class BSenseExperimentApp:
         )
         play_audio_cue(cue)
 
-    def _on_response_key(self, _event: object) -> None:
+    def _on_response_key(self, _event: object) -> str | None:
         if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
-            return
+            return None
         step = self.plan[self.step_index]
-        if step.response_key != "space" or self.current_response_time is not None:
-            return
+        if step.response_key != "space":
+            return None
+        if self.current_response_time is not None:
+            return "break"
         self.current_response_time = time.monotonic()
+        correct = bool(step.metadata.get("is_target"))
+        feedback_shown = bool(self.current_context.get("nback_feedback_enabled"))
         self._push_step_marker(
             "nback_response",
             459,
             step,
             response_key="space",
             reaction_time_s=round(self.current_response_time - self.step_started, 6),
+            correct=correct,
+            feedback_shown=feedback_shown,
         )
+        if feedback_shown:
+            self.step_text_replaced = True
+            feedback_text = "✓ 正确" if correct else "✕ 错误"
+            feedback_color = "#14804a" if correct else "#b42318"
+            self.cue_label.configure(
+                text=feedback_text,
+                font=(UI_FONT_FAMILY, self._cue_font_size(feedback_text, False), "bold"),
+                foreground=feedback_color,
+            )
+        return "break"
 
     def _complete_manual_step(self) -> None:
         if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
             return
         step = self.plan[self.step_index]
+        if step.advance not in {"form", "operator"} or self.step_completion_started:
+            return
+        generation = self.step_generation
+        step_index = self.step_index
+        self.action_button.configure(state="disabled")
         responses: dict[str, object] = {}
         if step.advance == "form":
             collected = self._read_inline_form(step.fields)
             if collected is None:
+                self.action_button.configure(state="normal")
+                return
+            if step.event == "nback_precheck_start" and not collected.get("ready_to_continue"):
+                self.form_error.set("当前状态不适合继续 M2；请按 Esc 中止本模块，休息后使用新 Run 重新采集。")
+                self.action_button.configure(state="normal")
                 return
             responses = collected
         if step.block is not None and step.block in self.block_results:
@@ -1292,11 +1533,31 @@ class BSenseExperimentApp:
                 }
             )
         self.action_button.pack_forget()
-        self._complete_current_step(**responses)
+        self.task_frame.focus_set()
+        self._complete_current_step(
+            expected_generation=generation,
+            expected_step_index=step_index,
+            **responses,
+        )
 
-    def _complete_current_step(self, **completion_data: object) -> None:
+    def _complete_current_step(
+        self,
+        *,
+        expected_generation: int | None = None,
+        expected_step_index: int | None = None,
+        **completion_data: object,
+    ) -> None:
         if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
             return
+        if expected_generation is not None and expected_generation != self.step_generation:
+            return
+        if expected_step_index is not None and expected_step_index != self.step_index:
+            return
+        if self.step_completion_started:
+            return
+        generation = self.step_generation
+        step_index = self.step_index
+        self.step_completion_started = True
         step = self.plan[self.step_index]
         if step.response_key is not None:
             responded = self.current_response_time is not None
@@ -1326,14 +1587,42 @@ class BSenseExperimentApp:
             )
         if step.end_sound is not None:
             self._play_audio_cue(step.end_sound, step, "end")
-        self.root.after_idle(self._advance_step)
+        self.pending_advance_id = self.root.after_idle(
+            lambda: self._advance_after_completion(generation, step_index)
+        )
 
-    def _tick_step(self) -> None:
+    def _advance_after_completion(self, generation: int, step_index: int) -> None:
+        self.pending_advance_id = None
+        if (
+            not self.active
+            or self.stopping
+            or generation != self.step_generation
+            or step_index != self.step_index
+            or not self.step_completion_started
+        ):
+            return
+        self._advance_step()
+
+    def _tick_step(self, generation: int | None = None, step_index: int | None = None) -> None:
+        generation = self.step_generation if generation is None else generation
+        step_index = self.step_index if step_index is None else step_index
         if not self.active or self.stopping or self.step_index >= len(self.plan):
+            return
+        if generation != self.step_generation or step_index != self.step_index or self.step_completion_started:
             return
         self.tick_id = None
         step = self.plan[self.step_index]
-        remaining = max(0.0, step.duration - (time.monotonic() - self.step_started))
+        elapsed = time.monotonic() - self.step_started
+        remaining = max(0.0, step.duration - elapsed)
+        if step.text_duration is not None and elapsed >= step.text_duration and not self.step_text_replaced:
+            replacement = step.text_after or ""
+            self._display_visual(None)
+            self.cue_label.configure(
+                text=replacement,
+                font=(UI_FONT_FAMILY, self._cue_font_size(replacement, False), "bold"),
+                foreground=self.default_cue_foreground,
+            )
+            self.step_text_replaced = True
         self.countdown_label.configure(text=f"{remaining:0.1f} s")
         if (
             step.warning_sound is not None
@@ -1370,9 +1659,12 @@ class BSenseExperimentApp:
                 text=f"步骤 {self.step_index + 1}/{len(self.plan)}  |  XDF {self.xdf_current_size / 1024:.1f} KB"
             )
         if remaining <= 0:
-            self._complete_current_step()
+            self._complete_current_step(
+                expected_generation=generation,
+                expected_step_index=step_index,
+            )
             return
-        self.tick_id = self.root.after(100, self._tick_step)
+        self.tick_id = self.root.after(100, lambda: self._tick_step(generation, step_index))
 
     def _push_marker(self, payload: dict) -> float:
         timestamp = local_clock()
@@ -1412,7 +1704,11 @@ class BSenseExperimentApp:
         self.secondary_button.pack_forget()
         self.abort_button.pack_forget()
         self.quality_frame.pack_forget()
-        self.cue_label.configure(text="正在保存数据", font=(UI_FONT_FAMILY, 48, "bold"))
+        self.cue_label.configure(
+            text="正在保存数据",
+            font=(UI_FONT_FAMILY, 48, "bold"),
+            foreground=self.default_cue_foreground,
+        )
         self.detail_label.configure(text="正在关闭并验证 XDF，请勿关闭程序")
         self.countdown_label.configure(text="")
 
@@ -1445,9 +1741,7 @@ class BSenseExperimentApp:
         if self.stopping:
             return
         self.stopping = True
-        if self.tick_id is not None:
-            self.root.after_cancel(self.tick_id)
-            self.tick_id = None
+        self._cancel_step_callbacks()
 
         def stop() -> None:
             error: Exception | None = None
@@ -1547,7 +1841,20 @@ class BSenseExperimentApp:
         self.recorder_log_path = None
         self.current_response_time = None
 
+    def _cancel_step_callbacks(self) -> None:
+        self.step_generation += 1
+        self.step_completion_started = True
+        for attribute in ("tick_id", "pending_advance_id"):
+            callback_id = getattr(self, attribute, None)
+            if callback_id is not None:
+                try:
+                    self.root.after_cancel(callback_id)
+                except Exception:  # noqa: BLE001 - callback may already be executing
+                    pass
+                setattr(self, attribute, None)
+
     def _return_to_setup(self) -> None:
+        self._cancel_step_callbacks()
         self.active = False
         self.stopping = False
         self._close_current_files()
@@ -1571,6 +1878,10 @@ class BSenseExperimentApp:
         if self.ui_action_poll_id is not None:
             self.root.after_cancel(self.ui_action_poll_id)
             self.ui_action_poll_id = None
+        if self.task_signal_poll_id is not None:
+            self.root.after_cancel(self.task_signal_poll_id)
+            self.task_signal_poll_id = None
+        self.task_signal_manager.stop()
         self.root.destroy()
 
 

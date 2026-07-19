@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import array
 import shutil
@@ -61,7 +62,7 @@ def _trim_silence(path: Path, margin_seconds: float = 0.08) -> None:
         destination.writeframes(trimmed.tobytes())
 
 
-async def generate() -> None:
+async def generate(*, missing_only: bool = False) -> None:
     try:
         import edge_tts
     except ImportError as error:
@@ -71,8 +72,10 @@ async def generate() -> None:
     with tempfile.TemporaryDirectory(prefix="bsense-voice-") as temporary_directory:
         temporary_root = Path(temporary_directory)
         for cue, text in VOICE_CUE_TEXTS.items():
-            mp3_path = temporary_root / f"{cue}.mp3"
             wav_path = VOICE_AUDIO_ROOT / f"{cue}.wav"
+            if missing_only and wav_path.is_file():
+                continue
+            mp3_path = temporary_root / f"{cue}.mp3"
             await edge_tts.Communicate(text, VOICE_CUE_VOICE, rate=VOICE_CUE_RATE).save(str(mp3_path))
             _convert_to_wav(mp3_path, wav_path)
             _trim_silence(wav_path)
@@ -80,4 +83,7 @@ async def generate() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(generate())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--missing-only", action="store_true", help="Only generate cues without a WAV asset")
+    arguments = parser.parse_args()
+    asyncio.run(generate(missing_only=arguments.missing_only))

@@ -356,6 +356,8 @@ class LiveStreamManager:
             try:
                 stream_infos = tuple(self._resolver(1.0))
                 self._connect_new_streams(stream_infos)
+                with self._lock:
+                    self._errors.pop("discovery", None)
             except Exception as caught:  # noqa: BLE001 - discovery must remain retryable
                 with self._lock:
                     self._errors["discovery"] = str(caught)

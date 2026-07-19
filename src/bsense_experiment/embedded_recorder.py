@@ -32,6 +32,9 @@ class _RecordedStream:
     last_timestamp: float = 0.0
     sample_count: int = 0
     clock_offsets: list[tuple[float, float]] = field(default_factory=list)
+    clock_offset_failures: int = 0
+    timestamp_inversions: int = 0
+    previous_timestamp: float | None = None
 
 
 def _default_inlet_factory(info: Any) -> StreamInlet:
@@ -49,6 +52,8 @@ class EmbeddedRecorderClient:
         require_biomultilite_streams: bool = True,
         discovery_timeout: float = 3.0,
         offset_interval: float = 5.0,
+        offset_retry_interval: float = 1.0,
+        offset_timeout: float = 1.0,
         boundary_interval: float = 10.0,
     ) -> None:
         self._resolver = resolver or resolve_streams
@@ -57,6 +62,8 @@ class EmbeddedRecorderClient:
         self.require_biomultilite_streams = require_biomultilite_streams
         self.discovery_timeout = discovery_timeout
         self.offset_interval = offset_interval
+        self.offset_retry_interval = offset_retry_interval
+        self.offset_timeout = offset_timeout
         self.boundary_interval = boundary_interval
         self._writer: XDFWriter | None = None
         self._streams: list[_RecordedStream] = []
@@ -220,7 +227,7 @@ class EmbeddedRecorderClient:
 
     def _record_stream(self, state: _RecordedStream) -> None:
         assert self._writer is not None
-        next_offset = time.monotonic() + self.offset_interval
+        next_offset = time.monotonic()
         try:
             while not self._stop_event.is_set():
                 samples, timestamps = state.inlet.pull_chunk(timeout=0.25, max_samples=4096)
@@ -234,18 +241,37 @@ class EmbeddedRecorderClient:
                     )
                     if state.sample_count == 0:
                         state.first_timestamp = float(timestamps[0])
+                    for timestamp in timestamps:
+                        current_timestamp = float(timestamp)
+                        if state.previous_timestamp is not None and current_timestamp < state.previous_timestamp:
+                            state.timestamp_inversions += 1
+                        state.previous_timestamp = current_timestamp
                     state.last_timestamp = float(timestamps[-1])
                     state.sample_count += len(timestamps)
                 if time.monotonic() >= next_offset:
                     try:
-                        offset = float(state.inlet.time_correction(timeout=0.5))
+                        offset = float(state.inlet.time_correction(timeout=self.offset_timeout))
                         now = float(local_clock())
                         collection_time = now - offset
                         self._writer.write_clock_offset(state.stream_id, collection_time, offset)
                         state.clock_offsets.append((collection_time, offset))
+                        if state.clock_offset_failures and len(state.clock_offsets) == 1:
+                            self._record_diagnostic(
+                                "clock_offset_recovered",
+                                stream=state.name,
+                                failure_count=state.clock_offset_failures,
+                            )
+                        next_offset = time.monotonic() + self.offset_interval
                     except Exception as error:  # noqa: BLE001 - samples can continue without an offset update
-                        self._record_diagnostic("clock_offset_failed", stream=state.name, error=str(error))
-                    next_offset = time.monotonic() + self.offset_interval
+                        state.clock_offset_failures += 1
+                        if state.clock_offset_failures == 1 or state.clock_offset_failures % 10 == 0:
+                            self._record_diagnostic(
+                                "clock_offset_failed",
+                                stream=state.name,
+                                failure_count=state.clock_offset_failures,
+                                error=str(error),
+                            )
+                        next_offset = time.monotonic() + self.offset_retry_interval
         except Exception as error:  # noqa: BLE001 - reported when the recording is finalized
             self._record_error(f"{state.name}: {error}")
 
@@ -292,6 +318,14 @@ class EmbeddedRecorderClient:
                     sample_count=state.sample_count,
                     first_timestamp=state.first_timestamp,
                     last_timestamp=state.last_timestamp,
+                    observed_srate=(
+                        (state.sample_count - 1) / (state.last_timestamp - state.first_timestamp)
+                        if state.sample_count > 1 and state.last_timestamp > state.first_timestamp
+                        else None
+                    ),
+                    clock_offset_count=len(state.clock_offsets),
+                    clock_offset_failures=state.clock_offset_failures,
+                    timestamp_inversions=state.timestamp_inversions,
                 )
         finally:
             for state in self._streams:

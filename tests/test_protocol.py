@@ -12,11 +12,13 @@ class ProtocolTests(unittest.TestCase):
     def test_short_protocol(self) -> None:
         plan = build_deviceqc_plan(short=True)
         markers = [step for step in plan if step.event]
-        self.assertEqual(len(plan), 38)
-        self.assertEqual(len(markers), 26)
-        self.assertEqual(sum(step.duration for step in plan), 74.0)
+        self.assertEqual(len(plan), 39)
+        self.assertEqual(len(markers), 27)
+        self.assertEqual(sum(step.duration for step in plan), 75.0)
         self.assertEqual(plan[0].event, "experiment_start")
         self.assertEqual(plan[-1].event, "experiment_end")
+        closed_prepare = next(step for step in plan if step.event == "rest_closed_prepare")
+        self.assertEqual(closed_prepare.start_sound, "close_eyes")
 
     def test_full_protocol_has_five_trials_per_action(self) -> None:
         plan = build_deviceqc_plan(short=False)
@@ -72,6 +74,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(run_ratings), 4)
         self.assertTrue(all(step.advance == "form" for step in run_ratings))
         self.assertTrue(all(step.metadata["rating_scope"] == "run" for step in run_ratings))
+        self.assertTrue(all("visible_movement" in {field.key for field in step.fields} for step in run_ratings))
 
     def test_nback_stimuli_are_response_aware(self) -> None:
         plan = build_protocol_plan("m2_nback", short=True, seed=42)
@@ -81,11 +84,32 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual({step.metadata["level"] for step in stimuli}, {0, 1, 2})
         self.assertTrue(all("is_target" in step.metadata for step in stimuli))
         self.assertTrue(all("position_in_block" in step.metadata for step in stimuli))
+        self.assertTrue(all(step.text_duration == 0.25 for step in stimuli))
+        self.assertTrue(all(step.text_after == "+" for step in stimuli))
         for level in (0, 1, 2):
             level_stimuli = [step for step in stimuli if step.metadata["level"] == level]
             self.assertEqual(sum(bool(step.metadata["is_target"]) for step in level_stimuli), 2)
+            if level == 0:
+                self.assertTrue(
+                    all((step.metadata["stimulus"] == "X") is bool(step.metadata["is_target"]) for step in level_stimuli)
+                )
+            else:
+                for index, step in enumerate(level_stimuli):
+                    expected_target = (
+                        index >= level
+                        and step.metadata["stimulus"] == level_stimuli[index - level].metadata["stimulus"]
+                    )
+                    self.assertIs(bool(step.metadata["is_target"]), expected_target)
         self.assertEqual(sum(step.event == "nback_task_end" for step in plan), 3)
         self.assertEqual(sum(step.event == "block_rest_end" for step in plan), 3)
+        pre_rest = next(step for step in plan if step.event == "nback_pre_rest_start")
+        self.assertEqual(pre_rest.text, "+")
+        self.assertEqual(pre_rest.completion_event, "nback_pre_rest_end")
+        precheck = next(step for step in plan if step.event == "nback_precheck_start")
+        self.assertEqual(
+            {field.key for field in precheck.fields},
+            {"kss_score", "mental_fatigue_score", "ready_to_continue"},
+        )
 
     def test_nback_supports_counterbalanced_level_order(self) -> None:
         plan = build_protocol_plan("m2_nback", short=True, seed=1, nback_order="counterbalanced")
@@ -110,6 +134,18 @@ class ProtocolTests(unittest.TestCase):
         settle = next(step for step in plan if step.event == "baseline_settle_start")
         self.assertIn("自然呼吸", settle.detail)
         self.assertIn("不要刻意深呼吸", settle.detail)
+        self.assertEqual(settle.text, "+")
+
+    def test_m1_has_operator_gated_kinesthetic_practice(self) -> None:
+        plan = build_protocol_plan("m1_mi", short=True, seed=42)
+        practice = next(step for step in plan if step.event == "mi_guided_practice_start")
+        self.assertEqual(practice.advance, "operator")
+        self.assertTrue(practice.metadata["exclude_from_analysis"])
+        self.assertIn("实际", practice.detail)
+        self.assertIn("想象", practice.detail)
+        imagery = [step for step in plan if step.event in {"mi_left", "mi_right"}]
+        self.assertTrue(all("双手保持不动" in step.detail for step in imagery))
+        self.assertTrue(all("掌心收紧" in step.detail for step in imagery))
 
     def test_m4b_marks_selected_target(self) -> None:
         plan = build_protocol_plan("m4b_target", short=True, seed=42, target_object="手机")

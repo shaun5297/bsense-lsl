@@ -40,6 +40,8 @@ class Step:
     warning_sound: str | None = None
     warning_at: float | None = None
     end_sound: str | None = None
+    text_duration: float | None = None
+    text_after: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,7 +88,7 @@ def _experiment_bounds(task: str, body: list[Step]) -> list[Step]:
         Step(
             "实验即将开始",
             PROTOCOL_BY_TASK[task].title,
-            2.0,
+            4.0,
             "experiment_start",
             10,
             metadata={"protocol": task},
@@ -120,8 +122,16 @@ def build_deviceqc_plan(short: bool = False, **_: object) -> list[Step]:
             10,
             start_sound="start",
         ),
-        Step("睁眼静息", "注视屏幕中央，保持头部不动", rest_seconds, "rest_open_start", 100),
+        Step("+", "睁眼静息：注视屏幕中央，保持头部不动", rest_seconds, "rest_open_start", 100),
         Step("睁眼静息结束", "继续保持不动", 0.5, "rest_open_end", 101),
+        Step(
+            "准备闭眼",
+            "听到提示后轻轻闭眼，保持清醒和头部不动",
+            3.0 if not short else 1.0,
+            "rest_closed_prepare",
+            112,
+            start_sound="close_eyes",
+        ),
         Step(
             "闭眼静息",
             "轻轻闭眼，保持清醒和头部不动",
@@ -132,7 +142,7 @@ def build_deviceqc_plan(short: bool = False, **_: object) -> list[Step]:
             warning_at=5.0,
             end_sound="open_eyes",
         ),
-        Step("闭眼静息结束", "请睁开眼睛", 1.0, "rest_closed_end", 111),
+        Step("闭眼静息结束", "请缓慢睁眼，等待下一阶段", 3.0 if not short else 1.0, "rest_closed_end", 111),
     ]
 
     actions = [
@@ -187,9 +197,9 @@ def build_deviceqc_plan(short: bool = False, **_: object) -> list[Step]:
 
     plan.extend(
         [
-            Step("结束睁眼静息", "注视屏幕中央，保持头部不动", rest_seconds, "rest_open_final_start", 100),
+            Step("+", "结束睁眼静息：注视屏幕中央，保持头部不动", rest_seconds, "rest_open_final_start", 100),
             Step("结束静息完成", "继续保持不动", 0.5, "rest_open_final_end", 101),
-        Step("实验完成", "请等待数据文件保存完成", 1.0, "experiment_end", 11, end_sound="complete"),
+            Step("实验完成", "请等待数据文件保存完成", 1.0, "experiment_end", 11, end_sound="complete"),
         ]
     )
     return plan
@@ -216,13 +226,21 @@ def build_m0_plan(short: bool = False, **_: object) -> list[Step]:
             completion_code=401,
         ),
         Step(
-            "自然呼吸稳定",
-            "睁眼注视中央，保持自然呼吸；不要刻意深呼吸",
+            "+",
+            "自然呼吸稳定：睁眼注视中央；不要刻意深呼吸",
             settle,
             "baseline_settle_start",
             402,
         ),
         Step("稳定段结束", "继续保持不动", 0.1, "baseline_settle_end", 403),
+        Step(
+            "准备闭眼",
+            "听到提示后轻轻闭眼，保持清醒和头部不动",
+            3.0 if not short else 1.0,
+            "rest_closed_prepare",
+            112,
+            start_sound="close_eyes",
+        ),
         Step(
             "闭眼静息",
             "轻轻闭眼、保持清醒，不刻意思考",
@@ -233,8 +251,8 @@ def build_m0_plan(short: bool = False, **_: object) -> list[Step]:
             warning_at=1.0 if short else 5.0,
             end_sound="open_eyes",
         ),
-        Step("闭眼静息结束", "请缓慢睁眼", 0.5, "rest_closed_end", 111),
-        Step("睁眼静息", "注视屏幕中央十字，保持头部不动", opened, "rest_open_start", 100),
+        Step("闭眼静息结束", "请缓慢睁眼，等待下一阶段", 3.0 if not short else 1.0, "rest_closed_end", 111),
+        Step("+", "睁眼静息：注视屏幕中央十字，保持头部不动", opened, "rest_open_start", 100),
         Step("睁眼静息结束", "继续保持放松", 0.5, "rest_open_end", 101),
         Step(
             "基线问卷",
@@ -264,8 +282,18 @@ def build_m1_plan(
     rest_seconds = 1.0 if short else (4.0 if older_adult else 2.5)
     run_rest = 1.0 if short else (300.0 if older_adult else 180.0)
     conditions = (
-        ("mi_left", 301, "←", "想象左手持续握拳/松开"),
-        ("mi_right", 302, "→", "想象右手持续握拳/松开"),
+        (
+            "mi_left",
+            301,
+            "←",
+            "双手保持不动；想象左手掌心收紧、手指弯曲后松开的本体感觉（约 1 Hz）",
+        ),
+        (
+            "mi_right",
+            302,
+            "→",
+            "双手保持不动；想象右手掌心收紧、手指弯曲后松开的本体感觉（约 1 Hz）",
+        ),
         ("mi_idle", 300, "○", "放空，不想任何动作"),
     )
     run_ratings = (
@@ -273,8 +301,29 @@ def build_m1_plan(
         InputField("right_imagery_success", "本 Run 右手想象成功度（1-5）", "rating", 1, 5),
         InputField("idle_stability", "本 Run 空闲态保持程度（1-5）", "rating", 1, 5),
         InputField("imagery_effort", "本 Run 总体主观努力度（1-5）", "rating", 1, 5),
+        InputField("visible_movement", "实验员是否观察到实际手、头或身体动作", "boolean"),
     )
-    body: list[Step] = []
+    body: list[Step] = [
+        Step(
+            "✋ → ✊ → ✋",
+            "引导练习（不用于训练）：先实际左右手各握拳/松开 3 次；再保持双手完全不动，想象掌心收紧、手指弯曲和松开的感觉。确认会做后继续",
+            0.0,
+            "mi_guided_practice_start",
+            307,
+            advance="operator",
+            completion_event="mi_guided_practice_complete",
+            completion_code=308,
+            metadata={"exclude_from_analysis": True},
+            start_sound="start",
+        ),
+        Step(
+            "+",
+            "练习结束，双手完全放松并保持静止；正式采集即将开始",
+            3.0 if not short else 1.0,
+            "mi_formal_start",
+            309,
+        ),
+    ]
     global_trial = 0
     for run_number in range(1, runs + 1):
         trials = _shuffle_without_long_streaks(
@@ -285,11 +334,12 @@ def build_m1_plan(
             Step(
                 f"Run {run_number} 准备",
                 f"本 Run 共 {len(trials)} 个随机试次",
-                2.0 if not short else 0.5,
+                5.0 if not short else 1.0,
                 "block_start",
                 20,
                 f"run_{run_number}",
                 metadata={"run_in_task": run_number},
+                start_sound="start",
             )
         )
         for trial_in_run, (event, code, cue, detail) in enumerate(trials, start=1):
@@ -360,16 +410,16 @@ def build_m1_plan(
                     "inter_run_rest",
                     310,
                     f"run_{run_number}",
+                    start_sound="rest_start",
                     warning_sound="ending_soon" if not short else None,
                     warning_at=10.0 if not short else None,
-                    end_sound="start",
                 )
             )
     return _experiment_bounds("m1_mi", body)
 
 
 def _nback_sequence(level: int, count: int, rng: random.Random) -> list[tuple[str, bool]]:
-    letters = "BCDFGHJKLMNPQRSTVWXYZ"
+    letters = "BCDFGHJKLMNPQRSTVWYZ"
     sequence: list[str] = []
     eligible_positions = list(range(level, count))
     target_count = min(len(eligible_positions), max(1, round(count * 0.25)))
@@ -424,6 +474,8 @@ def _nback_stimulus_steps(
                     "position_in_block": position_in_block,
                     **(extra_metadata or {}),
                 },
+                text_duration=min(0.5, duration / 2.0),
+                text_after="+",
             )
         )
     return steps
@@ -445,6 +497,11 @@ def build_m2_plan(
         InputField("fatigue", "主观疲劳（1-10）", "rating", 1, 10),
         InputField("difficulty", "主观难度（1-10）", "rating", 1, 10),
     )
+    precheck = (
+        InputField("kss_score", "M2 开始前困倦程度 KSS（1-9）", "rating", 1, 9),
+        InputField("mental_fatigue_score", "M2 开始前精神疲劳（1=无，5=很强）", "rating", 1, 5),
+        InputField("ready_to_continue", "实验员确认被试无明显不适且可以继续", "boolean"),
+    )
     instructions = {
         0: "看到 X 时按空格键",
         1: "当前字母与上一个相同时按空格键",
@@ -457,7 +514,33 @@ def build_m2_plan(
         levels = latin_square[seed % len(latin_square)]
     else:
         raise ValueError("N-Back 顺序必须是 ascending 或 counterbalanced")
-    body: list[Step] = []
+    body: list[Step] = [
+        Step(
+            "+",
+            "M2 前安静恢复：注视中央、自然呼吸并保持不动；该段不计入认知负荷分析",
+            1.0 if short else 60.0,
+            "nback_pre_rest_start",
+            415,
+            completion_event="nback_pre_rest_end",
+            completion_code=416,
+            metadata={"exclude_from_primary_task_analysis": True},
+            start_sound="rest_start",
+            warning_sound="ending_soon" if not short else None,
+            warning_at=5.0 if not short else None,
+        ),
+        Step(
+            "M2 开始前状态",
+            "记录开始前状态；若存在明显不适，请选择“否”并中止本模块",
+            0.0,
+            "nback_precheck_start",
+            417,
+            advance="form",
+            completion_event="nback_precheck",
+            completion_code=418,
+            metadata={"exclude_from_primary_task_analysis": True},
+            fields=precheck,
+        ),
+    ]
     for order_position, level in enumerate(levels, start=1):
         for block_number in range(1, blocks_per_level + 1):
             block_name = f"{level}back_{block_number}"
@@ -475,6 +558,7 @@ def build_m2_plan(
                         "order_position": order_position,
                         "nback_order": nback_order,
                     },
+                    start_sound="start",
                 )
             )
             body.extend(_nback_stimulus_steps(level, stimulus_count, rng, block_name, stimulus_duration))
@@ -511,15 +595,15 @@ def build_m2_plan(
             )
             body.append(
                 Step(
-                    "休息",
-                    "注视中央并保持自然呼吸，准备下一 Block",
+                    "+",
+                    "区块恢复：注视中央并保持自然呼吸，准备下一 Block",
                     rest_duration,
                     "block_rest",
                     452,
                     block_name,
+                    start_sound="rest_start",
                     warning_sound="ending_soon" if not short else None,
                     warning_at=5.0 if not short else None,
-                    end_sound="start",
                 )
             )
             body.append(
@@ -570,7 +654,17 @@ def build_m3a_plan(short: bool = False, **_: object) -> list[Step]:
         ("motion_stand", 516, "在实验员保护下快速起身", repetitions),
     )
     for event, code, cue, count in actions:
-        body.append(Step(f"准备：{cue}", f"本组 {count} 次", 1.0, "block_start", 20, event))
+        body.append(
+            Step(
+                f"准备：{cue}",
+                f"本组 {count} 次，听到提示后再开始",
+                1.0 if short else 3.0,
+                "block_start",
+                20,
+                event,
+                start_sound="start",
+            )
+        )
         for trial in range(1, count + 1):
             body.append(
                 Step(
@@ -628,6 +722,7 @@ def build_m3b_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step
             1.0 if short else 15.0,
             "fatigue_task_start",
             520,
+            start_sound="start",
         )
     ]
     for segment in range(1, segment_count + 1):
@@ -638,7 +733,7 @@ def build_m3b_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step
             Step(
                 f"第 {segment}/{segment_count} 段",
                 "连续 1-back，目标出现时按空格",
-                0.1,
+                1.0 if short else 3.0,
                 "fatigue_segment_start",
                 523,
                 block_name,
@@ -647,6 +742,7 @@ def build_m3b_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step
                     "elapsed_minutes_start": (segment - 1) * 2,
                     "sequence_reset": True,
                 },
+                start_sound="start",
             )
         )
         body.extend(
@@ -690,11 +786,12 @@ def build_m3b_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step
     body.extend(
         [
             Step(
-                "任务后恢复",
-                "睁眼注视中央，保持自然呼吸和身体静止",
+                "+",
+                "任务后恢复：睁眼注视中央，保持自然呼吸和身体静止",
                 2.0 if short else 30.0,
                 "fatigue_recovery_start",
                 525,
+                start_sound="rest_start",
             ),
             Step("恢复段结束", "继续保持放松", 0.1, "fatigue_recovery_end", 526),
         ]
