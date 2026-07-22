@@ -25,7 +25,7 @@ BioMultiLite 的 fNIRS 流保存的是设备发布的 735/850 nm 原始光学通
 示例：
 
 ```json
-{"code":301,"event":"mi_left","block":"run_1","trial":1,"condition":"mi_left","participant":"pilot01","session":"01","run":"001","task":"m1_mi","protocol_seed":123456789,"module_index":1,"module_count":3,"module_sequence":["m0_baseline","m1_mi","m5_debrief"],"app_version":"0.8.0","unix_time":1783840000.0,"lsl_timestamp":416000.123456}
+{"code":301,"event":"mi_left","block":"run_1","trial":1,"condition":"mi_left","participant":"pilot01","session":"01","run":"001","task":"m1_mi","protocol_seed":123456789,"module_index":2,"module_count":4,"module_sequence":["m0_baseline","m1_mi","m4a_intent","m4b_target"],"acquisition_batch":"two_part_a","short_protocol":false,"older_adult_timing":false,"app_version":"0.8.0","unix_time":1783840000.0,"lsl_timestamp":416000.123456}
 ```
 
 字段：
@@ -43,6 +43,9 @@ BioMultiLite 的 fNIRS 流保存的是设备发布的 735/850 nm 原始光学通
 | `protocol_seed` | 由被试、会话、Run 和任务派生的可复现随机种子 |
 | `module_index` / `module_count` | 本次连续采集中的模块位置和模块总数 |
 | `module_sequence` | 本次开始时选择的有序模块任务名列表 |
+| `acquisition_batch` | 采集批次预设标识：`two_part_a/b`、`three_part_1/2/3` 或 `custom` |
+| `short_protocol` | 是否使用仅供联调的短流程 |
+| `older_adult_timing` | 是否启用 M1 老年被试节奏 |
 | `app_version` | 实验程序版本 |
 | `unix_time` | 系统 Unix 时间 |
 | `lsl_timestamp` | LSL 本地时钟时间戳 |

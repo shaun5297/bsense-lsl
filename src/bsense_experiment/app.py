@@ -67,6 +67,39 @@ OBJECT_ASSETS = {
     "手机": "mobilephone.png",
     "药瓶": "medicinebottle.png",
 }
+CUSTOM_ACQUISITION_BATCH = "自定义"
+TWO_BATCH_A_LABEL = "两批方案 A｜探索性运动与意图"
+TWO_BATCH_B_LABEL = "两批方案 B｜核心认知与疲劳"
+THREE_BATCH_1_LABEL = "三批方案 1｜运动与意图"
+THREE_BATCH_2_LABEL = "三批方案 2｜认知与注意"
+THREE_BATCH_3_LABEL = "三批方案 3｜安全动作与疲劳"
+ACQUISITION_BATCH_PRESETS: dict[str, tuple[str, tuple[str, ...], str]] = {
+    TWO_BATCH_A_LABEL: (
+        "two_part_a",
+        ("m0_baseline", "m1_mi", "m4a_intent", "m4b_target"),
+        "M0 → M1 → M4A → M4B；自动计时约 52.4 分钟。",
+    ),
+    TWO_BATCH_B_LABEL: (
+        "two_part_b",
+        ("m0_baseline", "m2_nback", "m3a_safety", "m3b_fatigue", "m5_debrief"),
+        "M0 → M2 → M3A → M3B → M5；自动计时约 51.6 分钟，另加 M5 问卷。",
+    ),
+    THREE_BATCH_1_LABEL: (
+        "three_part_1",
+        ("m0_baseline", "m1_mi", "m4a_intent"),
+        "M0 → M1 → M4A；自动计时约 43.6 分钟。",
+    ),
+    THREE_BATCH_2_LABEL: (
+        "three_part_2",
+        ("m0_baseline", "m2_nback", "m4b_target"),
+        "M0 → M2 → M4B；自动计时约 44.8 分钟。",
+    ),
+    THREE_BATCH_3_LABEL: (
+        "three_part_3",
+        ("m0_baseline", "m3a_safety", "m3b_fatigue", "m5_debrief"),
+        "M0 → M3A → M3B → M5；自动计时约 21.2 分钟，另加 M5 问卷。",
+    ),
+}
 TASK_SIGNAL_KINDS = ("eeg", "fnirs", "motion")
 BSENSE_EEG_RAIL_ABS = 375_000.0
 BSENSE_EEG_RAIL_TOLERANCE = 1_000.0
@@ -287,6 +320,10 @@ class BSenseExperimentApp:
         self.nback_feedback = BooleanVar(value=False)
         self.target_object = StringVar(value="水杯")
         self.nback_order = StringVar(value="由易到难（原方案）")
+        self.acquisition_batch = StringVar(value=CUSTOM_ACQUISITION_BATCH)
+        self.acquisition_batch_detail = StringVar(
+            value="自由选择模块；正式任务建议包含 M0，跨日采集请更换 Session。"
+        )
         self.consent_confirmed = BooleanVar(value=False)
         self.operator_ready = BooleanVar(value=False)
         self.streams_ready = BooleanVar(value=False)
@@ -329,6 +366,7 @@ class BSenseExperimentApp:
         self.event_log_path: Path | None = None
         self.current_context: dict[str, object] = {}
         self.base_context: dict[str, str] = {}
+        self.active_acquisition_batch_id = "custom"
         self.output_directory = Path()
         self.module_queue: list[str] = []
         self.module_index = -1
@@ -477,6 +515,22 @@ class BSenseExperimentApp:
 
         module_frame = ttk.LabelFrame(module_tab, text="实验模块（可多选，按下列顺序执行）", padding=12)
         module_frame.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 12))
+        ttk.Label(module_frame, text="采集批次预设").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        batch_combobox = ttk.Combobox(
+            module_frame,
+            textvariable=self.acquisition_batch,
+            values=(CUSTOM_ACQUISITION_BATCH, *ACQUISITION_BATCH_PRESETS),
+            state="readonly",
+            width=34,
+        )
+        batch_combobox.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=(0, 6))
+        batch_combobox.bind("<<ComboboxSelected>>", self._apply_acquisition_batch)
+        ttk.Label(
+            module_frame,
+            textvariable=self.acquisition_batch_detail,
+            foreground="#315f8c",
+            wraplength=760,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
         for index, protocol in enumerate(PROTOCOLS):
             checkbutton = ttk.Checkbutton(
                 module_frame,
@@ -484,8 +538,8 @@ class BSenseExperimentApp:
                 variable=self.module_vars[protocol.task],
                 command=self._module_selection_changed,
             )
-            checkbutton.grid(row=index, column=0, sticky="w", padx=(0, 18), pady=4)
-        module_frame.columnconfigure(0, weight=1)
+            checkbutton.grid(row=index + 2, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
+        module_frame.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
             module_tab,
@@ -667,7 +721,29 @@ class BSenseExperimentApp:
         return [protocol.task for protocol in PROTOCOLS if self.module_vars[protocol.task].get()]
 
     def _module_selection_changed(self) -> None:
+        self.acquisition_batch.set(CUSTOM_ACQUISITION_BATCH)
+        self._update_acquisition_batch_detail()
         self.practice_ready.set(False)
+        self._update_estimate()
+
+    def _update_acquisition_batch_detail(self) -> None:
+        preset = ACQUISITION_BATCH_PRESETS.get(self.acquisition_batch.get())
+        detail = (
+            preset[2] + " 预设会自动关闭短流程；跨日采集请更换 Session。"
+            if preset is not None
+            else "自由选择模块；正式任务建议包含 M0，跨日采集请更换 Session。"
+        )
+        self.acquisition_batch_detail.set(detail)
+
+    def _apply_acquisition_batch(self, _event: object | None = None) -> None:
+        preset = ACQUISITION_BATCH_PRESETS.get(self.acquisition_batch.get())
+        if preset is not None:
+            selected_tasks = set(preset[1])
+            for task, variable in self.module_vars.items():
+                variable.set(task in selected_tasks)
+            self.short_protocol.set(False)
+            self.practice_ready.set(False)
+        self._update_acquisition_batch_detail()
         self._update_estimate()
 
     def _practice_config_changed(self, _event: object | None = None) -> None:
@@ -1177,6 +1253,14 @@ class BSenseExperimentApp:
         if not selected:
             self._show_setup_error("请至少选择一个实验模块。", 1)
             return
+        preset = ACQUISITION_BATCH_PRESETS.get(self.acquisition_batch.get())
+        if preset is not None and tuple(selected) == preset[1]:
+            self.active_acquisition_batch_id = preset[0]
+        else:
+            self.active_acquisition_batch_id = "custom"
+            if preset is not None:
+                self.acquisition_batch.set(CUSTOM_ACQUISITION_BATCH)
+                self._update_acquisition_batch_detail()
         if not all((self.operator_ready.get(), self.streams_ready.get(), self.recorder_ready.get())):
             self._show_setup_error("请完成“录制检查”页的前三项开始前确认。", 2)
             return
@@ -1236,6 +1320,9 @@ class BSenseExperimentApp:
             "module_index": self.module_index + 1,
             "module_count": len(self.module_queue),
             "module_sequence": self.module_queue,
+            "acquisition_batch": self.active_acquisition_batch_id,
+            "short_protocol": self.short_protocol.get(),
+            "older_adult_timing": self.older_adult.get(),
         }
         nback_order = "counterbalanced" if self.nback_order.get().startswith("拉丁方") else "ascending"
         if task == "m2_nback":
@@ -1867,6 +1954,10 @@ class BSenseExperimentApp:
         self.root.attributes("-fullscreen", False)
         self.task_frame.pack_forget()
         self.setup_frame.pack(fill="both", expand=True)
+        preset = ACQUISITION_BATCH_PRESETS.get(self.acquisition_batch.get())
+        if preset is not None and tuple(self._selected_modules()) != preset[1]:
+            self.acquisition_batch.set(CUSTOM_ACQUISITION_BATCH)
+            self._update_acquisition_batch_detail()
 
     def on_close(self) -> None:
         if self.stopping:

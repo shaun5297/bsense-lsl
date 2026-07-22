@@ -150,27 +150,38 @@ windows\run_monitor.bat
 windows\run.bat
 ```
 
-启动脚本默认选择“设备 QC”和“短流程”。先在三页表单中填写被试/会话资料、选择模块并完成录制检查。使用新的匿名被试和 Run 编号完成联调；程序确认 XDF 已创建后才会进入全屏任务。
+启动脚本默认不启用“短流程”，并预选 M0。先在三页表单中填写被试/会话资料、选择模块并完成录制检查；程序确认 XDF 已创建后才会进入全屏任务。只有进行流程联调时才显式启用短流程：macOS 使用 `bash "macos/run.sh" --short`，Windows 使用 `windows\run.bat --short`。
 
 默认输出：
 
 ```text
-C:\BCI\data\bsense\sub-pilot01_ses-01_task-deviceqc_run-001.xdf
-C:\BCI\data\bsense\logs\sub-pilot01_ses-01_task-deviceqc_run-001_events.jsonl
-C:\BCI\data\bsense\logs\sub-pilot01_ses-01_task-deviceqc_run-001_recorder.jsonl
+C:\BCI\data\bsense\sub-pilot01_ses-01_task-m0_baseline_run-001.xdf
+C:\BCI\data\bsense\logs\sub-pilot01_ses-01_task-m0_baseline_run-001_events.jsonl
+C:\BCI\data\bsense\logs\sub-pilot01_ses-01_task-m0_baseline_run-001_recorder.jsonl
 ```
 
 ### 6. 选择正式采集模块
 
-短流程确认 8 条流和 Marker 后：
+完成设备联调后：
 
-1. 取消“短流程”；
-2. 选择一个或多个正式模块；
+1. 正式采集保持“短流程”关闭；
+2. 可从“采集批次预设”一键选择两批 A/B 或三批方案；手动修改任一模块后自动切回“自定义”；
 3. 老年被试执行 M1 时可启用“老年被试节奏”；
 4. M2 正式组间比较建议在完成练习后选择拉丁方平衡顺序；保留由易到难仅用于原方案兼容，界面会提示时间/疲劳混杂；
 5. M2 的按键正误颜色反馈只用于练习/联调，正式采集保持关闭；
 6. 多选模块按 M0 → M1 → M2 → M3A → M3B → M4A → M4B → M5 执行；
 7. 每个模块结束并保存后，程序询问是否开始下一模块。
+
+不建议一次选择全部 M0–M5。推荐拆成两次采集，并在每次开始时执行 M0：
+
+| 采集批次 | 选择模块 | 自动计时 | 用途 |
+|---|---|---:|---|
+| A：探索性运动与意图 | M0、M1、M4A、M4B | 约 52.4 分钟 | 运动想象、提示后意图和目标注意 |
+| B：核心认知与疲劳 | M0、M2、M3A、M3B、M5 | 约 51.6 分钟，另加 M5 问卷 | 认知负荷、安全动作、疲劳和结束评估 |
+
+设备 QC 不计入固定批次：每个采集日首次佩戴设备后执行；若中途重新佩戴或调整传感器，应再次执行。两次采集若跨日，应分别使用 `session=01`、`session=02`；M5 只在最终批次执行。老年或容易疲劳的被试建议进一步拆成三次：`M0+M1+M4A`、`M0+M2+M4B`、`M0+M3A+M3B+M5`。
+
+应用批次预设会自动关闭短流程并清除未属于该批次的模块。每条 JSON Marker 会记录 `acquisition_batch`、`short_protocol` 和 `older_adult_timing`，因此即使数据跨 Session 保存，也能审计当时实际使用的批次和计时模式。
 
 首页被试表单包含姓名、年龄、性别、受教育年限和惯用手。姓名可留空；如填写，只保存在：
 

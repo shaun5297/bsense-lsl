@@ -10,4 +10,4 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 cd "$PROJECT_ROOT"
-exec "$PYTHON" -m bsense_experiment --short "$@"
+exec "$PYTHON" -m bsense_experiment "$@"

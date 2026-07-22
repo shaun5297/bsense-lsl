@@ -10,5 +10,5 @@ if not exist "%VENV%\Scripts\python.exe" (
   exit /b 1
 )
 
-"%VENV%\Scripts\python.exe" -m bsense_experiment --short
+"%VENV%\Scripts\python.exe" -m bsense_experiment %*
 if errorlevel 1 pause

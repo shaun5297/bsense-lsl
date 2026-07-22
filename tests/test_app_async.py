@@ -1,16 +1,25 @@
 import threading
 import time
 import unittest
+from inspect import signature
+from pathlib import Path
 from queue import SimpleQueue
 
 from bsense_experiment.app import (
+    ACQUISITION_BATCH_PRESETS,
     BSenseExperimentApp,
+    CUSTOM_ACQUISITION_BATCH,
+    THREE_BATCH_1_LABEL,
+    THREE_BATCH_2_LABEL,
+    THREE_BATCH_3_LABEL,
+    TWO_BATCH_A_LABEL,
+    TWO_BATCH_B_LABEL,
     eeg_clipped_channel_count,
     flat_channel_count,
     motion_activity_metrics,
 )
 from bsense_experiment.live import DataWindow, StreamDescriptor
-from bsense_experiment.protocols import Step
+from bsense_experiment.protocols import PROTOCOLS, Step
 
 
 class FakeRoot:
@@ -43,7 +52,65 @@ class FakeLabel:
         self.options.update(options)
 
 
+class FakeVariable:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def get(self) -> object:
+        return self.value
+
+    def set(self, value: object) -> None:
+        self.value = value
+
+
 class AppAsyncTests(unittest.TestCase):
+    def test_acquisition_batch_presets_repeat_baseline_and_keep_fatigue_late(self) -> None:
+        expected = {
+            TWO_BATCH_A_LABEL: ("m0_baseline", "m1_mi", "m4a_intent", "m4b_target"),
+            TWO_BATCH_B_LABEL: ("m0_baseline", "m2_nback", "m3a_safety", "m3b_fatigue", "m5_debrief"),
+            THREE_BATCH_1_LABEL: ("m0_baseline", "m1_mi", "m4a_intent"),
+            THREE_BATCH_2_LABEL: ("m0_baseline", "m2_nback", "m4b_target"),
+            THREE_BATCH_3_LABEL: ("m0_baseline", "m3a_safety", "m3b_fatigue", "m5_debrief"),
+        }
+        self.assertEqual({label: preset[1] for label, preset in ACQUISITION_BATCH_PRESETS.items()}, expected)
+        self.assertTrue(all(tasks[0] == "m0_baseline" for tasks in expected.values()))
+        self.assertTrue(all("deviceqc" not in tasks for tasks in expected.values()))
+        self.assertTrue(all(tasks[-1] in {"m4a_intent", "m4b_target", "m5_debrief"} for tasks in expected.values()))
+
+    def test_applying_acquisition_batch_selects_modules_and_disables_short_mode(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.acquisition_batch = FakeVariable(TWO_BATCH_A_LABEL)
+        app.acquisition_batch_detail = FakeVariable("")
+        app.module_vars = {protocol.task: FakeVariable(False) for protocol in PROTOCOLS}
+        app.short_protocol = FakeVariable(True)
+        app.practice_ready = FakeVariable(True)
+        estimates: list[bool] = []
+        app._update_estimate = lambda: estimates.append(True)
+
+        app._apply_acquisition_batch()
+
+        selected = tuple(task for task, variable in app.module_vars.items() if variable.get())
+        self.assertEqual(selected, ACQUISITION_BATCH_PRESETS[TWO_BATCH_A_LABEL][1])
+        self.assertFalse(app.short_protocol.get())
+        self.assertFalse(app.practice_ready.get())
+        self.assertIn("52.4", app.acquisition_batch_detail.get())
+        self.assertEqual(estimates, [True])
+
+        app._module_selection_changed()
+        self.assertEqual(app.acquisition_batch.get(), CUSTOM_ACQUISITION_BATCH)
+
+    def test_short_protocol_is_opt_in_for_app_and_launchers(self) -> None:
+        default_short = signature(BSenseExperimentApp.__init__).parameters["default_short"].default
+        project_root = Path(__file__).resolve().parents[1]
+        macos_launcher = (project_root / "macos" / "run.sh").read_text(encoding="utf-8")
+        windows_launcher = (project_root / "windows" / "run.bat").read_text(encoding="utf-8")
+
+        self.assertFalse(default_short)
+        self.assertNotIn("bsense_experiment --short", macos_launcher)
+        self.assertNotIn("bsense_experiment --short", windows_launcher)
+        self.assertIn('"$@"', macos_launcher)
+        self.assertIn("%*", windows_launcher)
+
     def test_worker_posts_ui_action_without_calling_tk(self) -> None:
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.root = FakeRoot()
