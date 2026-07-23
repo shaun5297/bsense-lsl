@@ -46,6 +46,7 @@ from .protocols import (
     build_protocol_plan,
     estimate_protocol_seconds,
 )
+from .resources import object_asset_path
 
 if TYPE_CHECKING:
     from .monitor import LiveMonitorWindow
@@ -1031,10 +1032,9 @@ class BSenseExperimentApp:
             self.task_signal_poll_id = self.root.after(500, self._update_task_signal_status)
 
     def _load_object_images(self) -> None:
-        asset_root = Path(__file__).resolve().parents[2] / "assets"
         for object_name, filename in OBJECT_ASSETS.items():
             try:
-                image = PhotoImage(file=str(asset_root / filename))
+                image = PhotoImage(file=str(object_asset_path(filename)))
                 factor = max(1, (max(image.width(), image.height()) + 419) // 420)
                 self.object_images[object_name] = image.subsample(factor, factor)
             except Exception:  # noqa: BLE001 - missing visuals fall back to large text cues
@@ -1976,7 +1976,7 @@ class BSenseExperimentApp:
         self.root.destroy()
 
 
-def run_self_test() -> None:
+def run_self_test() -> dict[str, object]:
     short_plan = build_deviceqc_plan(short=True)
     full_plan = build_deviceqc_plan(short=False)
     short_events = [step for step in short_plan if step.event]
@@ -2004,22 +2004,17 @@ def run_self_test() -> None:
             "steps": len(plan),
             "duration_s": round(sum(step.duration for step in plan), 1),
         }
-    print(
-        json.dumps(
-            {
-                "app_version": APP_VERSION,
-                "short_steps": len(short_plan),
-                "short_markers": len(short_events),
-                "short_duration_s": round(sum(step.duration for step in short_plan), 1),
-                "full_steps": len(full_plan),
-                "full_markers": len(full_events),
-                "full_duration_s": round(sum(step.duration for step in full_plan), 1),
-                "protocols": protocol_summary,
-                "status": "ok",
-            },
-            ensure_ascii=False,
-        )
-    )
+    return {
+        "app_version": APP_VERSION,
+        "short_steps": len(short_plan),
+        "short_markers": len(short_events),
+        "short_duration_s": round(sum(step.duration for step in short_plan), 1),
+        "full_steps": len(full_plan),
+        "full_markers": len(full_events),
+        "full_duration_s": round(sum(step.duration for step in full_plan), 1),
+        "protocols": protocol_summary,
+        "status": "ok",
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -2027,13 +2022,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--short", action="store_true", help="Preselect the short integration protocol")
     parser.add_argument("--monitor", action="store_true", help="Open only the BioMultiLite LSL live monitor")
     parser.add_argument("--self-test", action="store_true", help="Validate the protocol without opening the GUI")
+    parser.add_argument(
+        "--self-test-output",
+        type=Path,
+        help="Write self-test JSON to this file (used to verify windowed release builds)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     if args.self_test:
-        run_self_test()
+        rendered = json.dumps(run_self_test(), ensure_ascii=False)
+        if args.self_test_output is not None:
+            args.self_test_output.write_text(rendered + "\n", encoding="utf-8")
+        else:
+            print(rendered)
         return
     if args.monitor:
         from .monitor import run_live_monitor

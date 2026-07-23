@@ -39,3 +39,4 @@ reports/
 # Build artifacts
 build/
 dist/
+release/

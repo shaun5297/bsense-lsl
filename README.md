@@ -235,16 +235,17 @@ M4A/M4B 从 `assets` 加载水杯、手机和药瓶 PNG；图片缺失时自动�
 ```text
 bsense-lsl/
   assets/                     正式范式物体图片及 Tk 兼容 PNG
-  src/bsense_experiment/     GUI、内置 XDF 录制、离线语音与协议定义
-  macos/                     macOS 安装、启动和自测脚本
-  windows/                   Windows 安装与启动脚本
-  tools/                     中文女声资源生成工具
-  tests/                     协议、XDF 与录制后端测试
-  config/                    事件编码表
-  docs/                      复现和故障排查文档
-  data/README.md             本地数据说明，真实数据被 Git 忽略
-  .github/workflows/test.yml 自动化测试
-  pyproject.toml             版本和依赖入口
+  src/bsense_experiment/      GUI、内置 XDF 录制、离线语音与协议定义
+  packaging/                  桌面发行入口和随包说明
+  macos/                      macOS 安装、启动、自测与构建脚本
+  windows/                    Windows 安装、启动、自测与构建脚本
+  tools/                      发行构建和中文女声生成工具
+  tests/                      协议、XDF、资源与发行构建测试
+  config/                     事件编码表
+  docs/                       协议、数据、复现、发行和故障排查文档
+  data/README.md              本地数据说明，真实数据被 Git 忽略
+  .github/workflows/          跨平台测试与发行工作流
+  pyproject.toml              版本、运行依赖和构建依赖入口
 ```
 
 ## 测试
@@ -267,6 +268,27 @@ windows\self_test.bat
 .venv\Scripts\python -m bsense_experiment --self-test
 .venv\Scripts\python -m unittest discover -s tests -v
 ```
+
+## 可发行版
+
+项目可构建不依赖目标电脑 Python 环境的两个 ZIP：
+
+- Windows 10/11 x64；
+- macOS 15+ Apple Silicon（ARM64）。
+
+本地构建：
+
+```bash
+bash "macos/build_release.sh"
+```
+
+```bat
+windows\build_release.bat
+```
+
+GitHub Actions 也可手动构建两个平台；推送与项目版本一致的 `v*` 标签时才会创建
+GitHub Release。构建过程会校验目标架构、运行冻结程序自检并生成 SHA-256。完整说明
+见[发行构建文档](docs/RELEASE.md)。
 
 ### 重新生成中文女声（仅维护者）
 
@@ -308,5 +330,6 @@ git push -u origin main
 - [数据与 Marker 格式](docs/DATA_FORMAT.md)
 - [实时数据与模型接入](docs/REALTIME.md)
 - [macOS 使用说明](docs/MACOS.md)
+- [发行构建与验收](docs/RELEASE.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
 - [变更记录](CHANGELOG.md)
