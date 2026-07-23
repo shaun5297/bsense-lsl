@@ -38,4 +38,4 @@ bsense-monitor = "bsense_experiment.monitor:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-bsense_experiment = ["audio/*.wav"]
+bsense_experiment = ["assets/*.png", "audio/*.wav"]

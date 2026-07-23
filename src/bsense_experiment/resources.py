@@ -7,12 +7,12 @@ from pathlib import Path
 
 
 def application_resource_root() -> Path:
-    """Return the root containing data bundled by PyInstaller."""
+    """Return the package root containing application data."""
 
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
-        return Path(frozen_root)
-    return Path(__file__).resolve().parents[2]
+        return Path(frozen_root) / "bsense_experiment"
+    return Path(__file__).resolve().parent
 
 
 def object_asset_path(filename: str) -> Path:

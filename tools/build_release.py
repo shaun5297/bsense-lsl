@@ -22,7 +22,7 @@ PYPROJECT_PATH = PROJECT_ROOT / "pyproject.toml"
 ENTRYPOINT_PATH = PROJECT_ROOT / "packaging" / "entrypoints" / "bsense_lsl.py"
 RELEASE_README_PATH = PROJECT_ROOT / "packaging" / "RELEASE_README.txt"
 THIRD_PARTY_NOTICES_PATH = PROJECT_ROOT / "THIRD_PARTY_NOTICES.md"
-ASSET_ROOT = PROJECT_ROOT / "assets"
+ASSET_ROOT = PROJECT_ROOT / "src" / "bsense_experiment" / "assets"
 AUDIO_ROOT = PROJECT_ROOT / "src" / "bsense_experiment" / "audio"
 APP_NAME = "BSense-LSL"
 MACOS_BUNDLE_IDENTIFIER = "io.github.shaun5297.bsense-lsl"
@@ -126,7 +126,12 @@ def build_with_pyinstaller(
         str(dist_root),
     ]
     for filename in REQUIRED_ASSETS:
-        command.extend(["--add-data", f"{ASSET_ROOT / filename}{os.pathsep}assets"])
+        command.extend(
+            [
+                "--add-data",
+                f"{ASSET_ROOT / filename}{os.pathsep}bsense_experiment/assets",
+            ]
+        )
     if operating_system == "macos":
         command.extend(
             [

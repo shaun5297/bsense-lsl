@@ -234,8 +234,7 @@ M4A/M4B 从 `assets` 加载水杯、手机和药瓶 PNG；图片缺失时自动�
 
 ```text
 bsense-lsl/
-  assets/                     正式范式物体图片及 Tk 兼容 PNG
-  src/bsense_experiment/      GUI、内置 XDF 录制、离线语音与协议定义
+  src/bsense_experiment/      GUI、协议、录制器及内置图片/语音资源
   packaging/                  桌面发行入口和随包说明
   macos/                      macOS 安装、启动、自测与构建脚本
   windows/                    Windows 安装、启动、自测与构建脚本

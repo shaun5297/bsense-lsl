@@ -22,8 +22,8 @@ def load_release_module():
 
 
 class ResourceTests(unittest.TestCase):
-    def test_source_resource_root_is_project_root(self) -> None:
-        self.assertEqual(application_resource_root(), PROJECT_ROOT)
+    def test_resource_root_is_installed_package_root(self) -> None:
+        self.assertEqual(application_resource_root().name, "bsense_experiment")
 
     def test_required_object_assets_resolve(self) -> None:
         for filename in ("cup.png", "medicinebottle.png", "mobilephone.png"):
