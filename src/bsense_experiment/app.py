@@ -1641,14 +1641,18 @@ class BSenseExperimentApp:
         if self.current_response_time is not None:
             return "break"
         self.current_response_time = time.monotonic()
+        elapsed = self.current_response_time - self.step_started
         correct = bool(step.metadata.get("is_target"))
-        feedback_shown = bool(self.current_context.get("nback_feedback_enabled"))
+        # 反馈只在字母仍显示时给出；进入注视十字阶段后按键不再覆盖 "+",
+        # 保证每个试次末段的视觉刺激一致。
+        stimulus_phase = step.text_duration is None or elapsed < step.text_duration
+        feedback_shown = bool(self.current_context.get("nback_feedback_enabled")) and stimulus_phase
         self._push_step_marker(
             "nback_response",
             459,
             step,
             response_key="space",
-            reaction_time_s=round(self.current_response_time - self.step_started, 6),
+            reaction_time_s=round(elapsed, 6),
             correct=correct,
             feedback_shown=feedback_shown,
         )

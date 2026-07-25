@@ -217,6 +217,40 @@ class AppAsyncTests(unittest.TestCase):
         self.assertFalse(app.step_text_replaced)
         self.assertEqual(result, "break")
 
+    def test_late_nback_response_does_not_overwrite_fixation(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.plan = [
+            Step(
+                "+",
+                "",
+                2.0,
+                response_key="space",
+                text_duration=1.5,
+                text_after="+",
+                metadata={"is_target": False},
+            )
+        ]
+        app.current_response_time = None
+        app.current_context = {"nback_feedback_enabled": True}
+        app.step_started = time.monotonic() - 1.7
+        app.step_text_replaced = True
+        app.cue_label = FakeLabel()
+        app.cue_label.configure(text="+")
+        marker_extras: dict[str, object] = {}
+
+        def capture_marker(_event: str, _code: int, _step: Step, **extras: object) -> None:
+            marker_extras.update(extras)
+
+        app._push_step_marker = capture_marker
+        result = app._on_response_key(None)
+
+        self.assertEqual(result, "break")
+        self.assertEqual(app.cue_label.options["text"], "+")
+        self.assertFalse(marker_extras["feedback_shown"])
+
     def test_manual_completion_cannot_advance_a_timed_nback_step(self) -> None:
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.active = True
