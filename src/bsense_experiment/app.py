@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 from queue import Empty, SimpleQueue
-from tkinter import BooleanVar, PhotoImage, StringVar, Tk, Toplevel, messagebox, ttk
+from tkinter import BooleanVar, Frame, Label, PhotoImage, StringVar, Tk, Toplevel, messagebox, ttk
 from typing import TYPE_CHECKING, Callable
 
 from pylsl import IRREGULAR_RATE, StreamInfo, StreamOutlet, cf_string, local_clock
@@ -78,17 +78,17 @@ ACQUISITION_BATCH_PRESETS: dict[str, tuple[str, tuple[str, ...], str]] = {
     TWO_BATCH_A_LABEL: (
         "two_part_a",
         ("m0_baseline", "m1_mi", "m4a_intent", "m4b_target"),
-        "M0 → M1 → M4A → M4B；自动计时约 52.4 分钟。",
+        "M0 → M1 → M4A → M4B；自动计时约 48.7 分钟。",
     ),
     TWO_BATCH_B_LABEL: (
         "two_part_b",
         ("m0_baseline", "m2_nback", "m3a_safety", "m3b_fatigue", "m5_debrief"),
-        "M0 → M2 → M3A → M3B → M5；自动计时约 51.6 分钟，另加 M5 问卷。",
+        "M0 → M2 → M3A → M3B → M5；自动计时约 51.7 分钟，另加 M5 问卷。",
     ),
     THREE_BATCH_1_LABEL: (
         "three_part_1",
         ("m0_baseline", "m1_mi", "m4a_intent"),
-        "M0 → M1 → M4A；自动计时约 43.6 分钟。",
+        "M0 → M1 → M4A；自动计时约 39.9 分钟。",
     ),
     THREE_BATCH_2_LABEL: (
         "three_part_2",
@@ -98,10 +98,14 @@ ACQUISITION_BATCH_PRESETS: dict[str, tuple[str, tuple[str, ...], str]] = {
     THREE_BATCH_3_LABEL: (
         "three_part_3",
         ("m0_baseline", "m3a_safety", "m3b_fatigue", "m5_debrief"),
-        "M0 → M3A → M3B → M5；自动计时约 21.2 分钟，另加 M5 问卷。",
+        "M0 → M3A → M3B → M5；自动计时约 21.3 分钟，另加 M5 问卷。",
     ),
 }
 TASK_SIGNAL_KINDS = ("eeg", "fnirs", "motion")
+TASK_BG = "#141a22"
+TASK_FG = "#f5f7fa"
+TASK_MUTED_FG = "#9aa7b8"
+TASK_ACCENT = "#4da3ff"
 BSENSE_EEG_RAIL_ABS = 375_000.0
 BSENSE_EEG_RAIL_TOLERANCE = 1_000.0
 MI_ACCEL_SPAN_WARNING = 0.08
@@ -322,6 +326,7 @@ class BSenseExperimentApp:
         self.target_object = StringVar(value="水杯")
         self.nback_order = StringVar(value="由易到难（原方案）")
         self.acquisition_batch = StringVar(value=CUSTOM_ACQUISITION_BATCH)
+        self.skip_m0 = BooleanVar(value=False)
         self.acquisition_batch_detail = StringVar(
             value="自由选择模块；正式任务建议包含 M0，跨日采集请更换 Session。"
         )
@@ -368,6 +373,7 @@ class BSenseExperimentApp:
         self.current_context: dict[str, object] = {}
         self.base_context: dict[str, str] = {}
         self.active_acquisition_batch_id = "custom"
+        self.validated_rcs_port: int | None = None
         self.output_directory = Path()
         self.module_queue: list[str] = []
         self.module_index = -1
@@ -532,6 +538,12 @@ class BSenseExperimentApp:
             foreground="#315f8c",
             wraplength=760,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Checkbutton(
+            module_frame,
+            text="本日同会话已完成 M0，跳过基线模块（跨日或重新佩戴后不得跳过）",
+            variable=self.skip_m0,
+            command=self._skip_m0_changed,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
         for index, protocol in enumerate(PROTOCOLS):
             checkbutton = ttk.Checkbutton(
                 module_frame,
@@ -539,7 +551,7 @@ class BSenseExperimentApp:
                 variable=self.module_vars[protocol.task],
                 command=self._module_selection_changed,
             )
-            checkbutton.grid(row=index + 2, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
+            checkbutton.grid(row=index + 3, column=0, columnspan=2, sticky="w", padx=(0, 18), pady=4)
         module_frame.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
@@ -740,12 +752,20 @@ class BSenseExperimentApp:
         preset = ACQUISITION_BATCH_PRESETS.get(self.acquisition_batch.get())
         if preset is not None:
             selected_tasks = set(preset[1])
+            if self.skip_m0.get():
+                selected_tasks.discard("m0_baseline")
             for task, variable in self.module_vars.items():
                 variable.set(task in selected_tasks)
             self.short_protocol.set(False)
             self.practice_ready.set(False)
         self._update_acquisition_batch_detail()
         self._update_estimate()
+
+    def _skip_m0_changed(self) -> None:
+        if self.acquisition_batch.get() in ACQUISITION_BATCH_PRESETS:
+            self._apply_acquisition_batch()
+        else:
+            self._update_estimate()
 
     def _practice_config_changed(self, _event: object | None = None) -> None:
         self.practice_ready.set(False)
@@ -761,20 +781,22 @@ class BSenseExperimentApp:
             )
             for task in selected
         )
-        manual_tasks = {
-            "m0_baseline",
-            "m1_mi",
-            "m2_nback",
-            "m3a_safety",
-            "m3b_fatigue",
-            "m4a_intent",
-            "m4b_target",
-            "m5_debrief",
-        }
-        manual_note = "（另含人工确认/问卷时间）" if any(task in manual_tasks for task in selected) else ""
+        manual_note = ""
+        for task in selected:
+            plan = build_protocol_plan(
+                task,
+                short=self.short_protocol.get(),
+                older_adult=self.older_adult.get(),
+                target_object=self.target_object.get(),
+            )
+            if any(step.advance in {"operator", "form"} for step in plan):
+                manual_note = "（另含人工确认/问卷时间）"
+                break
         self.estimate_text.set(f"已选 {len(selected)} 个模块，自动计时约 {seconds / 60:.1f} 分钟{manual_note}")
         physiological_tasks = {task for task in selected if task not in {"deviceqc", "m0_baseline", "m5_debrief"}}
-        missing_baseline = "m0_baseline" not in selected and bool(physiological_tasks)
+        missing_baseline = (
+            "m0_baseline" not in selected and bool(physiological_tasks) and not self.skip_m0.get()
+        )
         warnings: list[str] = []
         if missing_baseline:
             warnings.append("提示：未选择 M0，本会话正式任务将缺少个体基线。")
@@ -853,64 +875,102 @@ class BSenseExperimentApp:
         self.stream_check_status.set(f"六类数值流已就绪：{found_labels}。开始录制时还会检查两条 Marker 流。")
 
     def _build_task_view(self) -> None:
-        self.task_frame = ttk.Frame(self.root, padding=28)
+        self.task_frame = Frame(self.root, bg=TASK_BG, padx=40, pady=28)
         style = ttk.Style(self.root)
         style.configure("Task.TButton", font=(UI_FONT_FAMILY, 16, "bold"), padding=(20, 14))
         style.configure("Quality.TButton", font=(UI_FONT_FAMILY, 14, "bold"), padding=(16, 12))
-        self.progress_label = ttk.Label(self.task_frame, text="", font=(UI_FONT_FAMILY, 14))
-        self.progress_label.pack(anchor="nw")
-        self.task_signal_label = ttk.Label(
-            self.task_frame,
-            textvariable=self.task_signal_status,
-            font=(UI_FONT_FAMILY, 13, "bold"),
+        style.configure(
+            "Task.Horizontal.TProgressbar",
+            troughcolor="#232c38",
+            background=TASK_ACCENT,
+            bordercolor=TASK_BG,
+            lightcolor=TASK_ACCENT,
+            darkcolor=TASK_ACCENT,
         )
-        self.task_signal_label.pack(anchor="nw", pady=(5, 0))
-        ttk.Label(
-            self.task_frame,
-            text="状态条检查断流、采样率、恒定通道与 EEG 削顶；M1 检测到明显动作时会自动写入复核标记。",
-            font=(UI_FONT_FAMILY, 10),
-            foreground="#666666",
-        ).pack(anchor="nw", pady=(2, 0))
-        ttk.Separator(self.task_frame).pack(fill="x", pady=12)
 
-        self.task_content = ttk.Frame(self.task_frame)
-        self.task_content.pack(fill="both", expand=True)
-        self.image_label = ttk.Label(self.task_content, anchor="center")
+        header = Frame(self.task_frame, bg=TASK_BG)
+        header.pack(fill="x")
+        self.module_header_label = Label(
+            header,
+            text="",
+            bg=TASK_BG,
+            fg=TASK_FG,
+            font=(UI_FONT_FAMILY, 15, "bold"),
+        )
+        self.module_header_label.pack(anchor="w")
+        self.progress_label = Label(
+            header,
+            text="",
+            bg=TASK_BG,
+            fg=TASK_MUTED_FG,
+            font=(UI_FONT_FAMILY, 13),
+        )
+        self.progress_label.pack(anchor="w", pady=(4, 0))
+        self.module_progress = ttk.Progressbar(
+            header,
+            style="Task.Horizontal.TProgressbar",
+            mode="determinate",
+            maximum=100,
+            value=0,
+        )
+        self.module_progress.pack(fill="x", pady=(8, 0))
+        self.task_signal_label = Label(
+            header,
+            textvariable=self.task_signal_status,
+            bg=TASK_BG,
+            fg=TASK_MUTED_FG,
+            font=(UI_FONT_FAMILY, 12, "bold"),
+        )
+        self.task_signal_label.pack(anchor="w", pady=(8, 0))
+        Label(
+            header,
+            text="状态条检查断流、采样率、恒定通道与 EEG 削顶；M1 检测到明显动作时会自动写入复核标记。",
+            bg=TASK_BG,
+            fg="#5c6a7a",
+            font=(UI_FONT_FAMILY, 10),
+        ).pack(anchor="w", pady=(2, 0))
+
+        self.task_content = Frame(self.task_frame, bg=TASK_BG)
+        self.task_content.pack(fill="both", expand=True, pady=(12, 0))
+        self.image_label = Label(self.task_content, bg=TASK_BG)
         self.image_label.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
         self.image_label.grid_remove()
-        self.cue_label = ttk.Label(
+        self.cue_label = Label(
             self.task_content,
             text="",
-            anchor="center",
-            justify="center",
+            bg=TASK_BG,
+            fg=TASK_FG,
             font=(UI_FONT_FAMILY, 54, "bold"),
             wraplength=1100,
+            justify="center",
         )
         self.cue_label.grid(row=1, column=0, sticky="nsew", pady=4)
-        self.default_cue_foreground = self.cue_label.cget("foreground")
-        self.detail_label = ttk.Label(
+        self.default_cue_foreground = TASK_FG
+        self.detail_label = Label(
             self.task_content,
             text="",
-            anchor="center",
-            justify="center",
+            bg=TASK_BG,
+            fg=TASK_MUTED_FG,
             font=(UI_FONT_FAMILY, 22),
             wraplength=1050,
+            justify="center",
         )
         self.detail_label.grid(row=2, column=0, sticky="ew", pady=8)
         self.form_frame = ttk.LabelFrame(self.task_content, text="请填写", padding=18)
         self.form_frame.grid(row=3, column=0, sticky="ew", padx=100, pady=8)
         self.form_frame.grid_remove()
-        self.countdown_label = ttk.Label(
+        self.countdown_label = Label(
             self.task_content,
             text="",
-            anchor="center",
-            font=(UI_FONT_FAMILY, 36, "bold"),
+            bg=TASK_BG,
+            fg=TASK_ACCENT,
+            font=(UI_FONT_FAMILY, 30, "bold"),
         )
         self.countdown_label.grid(row=4, column=0, sticky="ew", pady=8)
         self.task_content.columnconfigure(0, weight=1)
         self.task_content.rowconfigure(1, weight=1)
 
-        self.quality_frame = ttk.Frame(self.task_frame)
+        self.quality_frame = Frame(self.task_frame, bg=TASK_BG)
         self.quality_frame.pack(fill="x", pady=(4, 0))
         for label, event, code in (
             ("标记试次无效", "trial_invalid", 900),
@@ -933,7 +993,7 @@ class BSenseExperimentApp:
         ).pack(side="left", fill="x", expand=True)
         self.quality_frame.pack_forget()
 
-        self.button_frame = ttk.Frame(self.task_frame)
+        self.button_frame = Frame(self.task_frame, bg=TASK_BG)
         self.button_frame.pack(fill="x", pady=(10, 0))
         self.action_button = ttk.Button(
             self.button_frame,
@@ -1244,6 +1304,7 @@ class BSenseExperimentApp:
         except (ValueError, OSError) as error:
             self._show_setup_error(str(error), 2)
             return
+        self.validated_rcs_port = port
 
         if not self.consent_confirmed.get():
             self._show_setup_error("请确认已获得知情同意且资料录入准确。", 0)
@@ -1254,7 +1315,10 @@ class BSenseExperimentApp:
             self._show_setup_error("请至少选择一个实验模块。", 1)
             return
         preset = ACQUISITION_BATCH_PRESETS.get(self.acquisition_batch.get())
-        if preset is not None and tuple(selected) == preset[1]:
+        expected_tasks = preset[1] if preset is not None else None
+        if expected_tasks is not None and self.skip_m0.get():
+            expected_tasks = tuple(task for task in expected_tasks if task != "m0_baseline")
+        if preset is not None and tuple(selected) == expected_tasks:
             self.active_acquisition_batch_id = preset[0]
         else:
             self.active_acquisition_batch_id = "custom"
@@ -1321,6 +1385,7 @@ class BSenseExperimentApp:
             "module_count": len(self.module_queue),
             "module_sequence": self.module_queue,
             "acquisition_batch": self.active_acquisition_batch_id,
+            "m0_skipped": bool(self.skip_m0.get() and "m0_baseline" not in self.module_queue),
             "short_protocol": self.short_protocol.get(),
             "older_adult_timing": self.older_adult.get(),
         }
@@ -1351,6 +1416,10 @@ class BSenseExperimentApp:
         self.task_frame.pack(fill="both", expand=True)
         self.root.attributes("-fullscreen", True)
         self.cue_label.configure(text="正在准备录制", foreground=self.default_cue_foreground)
+        self.module_header_label.configure(
+            text=f"{PROTOCOL_BY_TASK[task].title}｜第 {self.module_index + 1}/{len(self.module_queue)} 模块"
+        )
+        self.module_progress.configure(maximum=len(self.plan), value=0)
         self.detail_label.configure(
             text=f"{PROTOCOL_BY_TASK[task].title}（{self.module_index + 1}/{len(self.module_queue)}）\n"
             "正在订阅 LSL 流并创建 XDF 文件"
@@ -1370,7 +1439,11 @@ class BSenseExperimentApp:
                 client: LabRecorderClient | EmbeddedRecorderClient = EmbeddedRecorderClient()
             else:
                 if port is None:
-                    port = int(self.rcs_port.get())
+                    port = self.validated_rcs_port
+                if port is None:
+                    self._show_saving_state()
+                    self._stop_and_return(aborted=True)
+                    return
                 client = LabRecorderClient(self.rcs_host.get().strip(), port)
 
             def prepare() -> None:
@@ -1498,6 +1571,7 @@ class BSenseExperimentApp:
         )
         self.detail_label.configure(text=step.detail)
         self.progress_label.configure(text=f"步骤 {self.step_index + 1}/{len(self.plan)}")
+        self.module_progress.configure(value=self.step_index + 1)
         self.action_button.pack_forget()
         self.action_button.configure(state="disabled")
         self.secondary_button.pack_forget()
@@ -1579,7 +1653,6 @@ class BSenseExperimentApp:
             feedback_shown=feedback_shown,
         )
         if feedback_shown:
-            self.step_text_replaced = True
             feedback_text = "✓ 正确" if correct else "✕ 错误"
             feedback_color = "#14804a" if correct else "#b42318"
             self.cue_label.configure(
@@ -1751,7 +1824,7 @@ class BSenseExperimentApp:
                 expected_step_index=step_index,
             )
             return
-        self.tick_id = self.root.after(100, lambda: self._tick_step(generation, step_index))
+        self.tick_id = self.root.after(50, lambda: self._tick_step(generation, step_index))
 
     def _push_marker(self, payload: dict) -> float:
         timestamp = local_clock()

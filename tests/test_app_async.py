@@ -81,6 +81,7 @@ class AppAsyncTests(unittest.TestCase):
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.acquisition_batch = FakeVariable(TWO_BATCH_A_LABEL)
         app.acquisition_batch_detail = FakeVariable("")
+        app.skip_m0 = FakeVariable(False)
         app.module_vars = {protocol.task: FakeVariable(False) for protocol in PROTOCOLS}
         app.short_protocol = FakeVariable(True)
         app.practice_ready = FakeVariable(True)
@@ -93,11 +94,34 @@ class AppAsyncTests(unittest.TestCase):
         self.assertEqual(selected, ACQUISITION_BATCH_PRESETS[TWO_BATCH_A_LABEL][1])
         self.assertFalse(app.short_protocol.get())
         self.assertFalse(app.practice_ready.get())
-        self.assertIn("52.4", app.acquisition_batch_detail.get())
+        self.assertIn("48.7", app.acquisition_batch_detail.get())
         self.assertEqual(estimates, [True])
 
         app._module_selection_changed()
         self.assertEqual(app.acquisition_batch.get(), CUSTOM_ACQUISITION_BATCH)
+
+    def test_skip_m0_removes_baseline_from_applied_batch(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.acquisition_batch = FakeVariable(TWO_BATCH_B_LABEL)
+        app.acquisition_batch_detail = FakeVariable("")
+        app.skip_m0 = FakeVariable(True)
+        app.module_vars = {protocol.task: FakeVariable(False) for protocol in PROTOCOLS}
+        app.short_protocol = FakeVariable(False)
+        app.practice_ready = FakeVariable(False)
+        app._update_estimate = lambda: None
+
+        app._apply_acquisition_batch()
+
+        selected = tuple(task for task, variable in app.module_vars.items() if variable.get())
+        expected = tuple(
+            task for task in ACQUISITION_BATCH_PRESETS[TWO_BATCH_B_LABEL][1] if task != "m0_baseline"
+        )
+        self.assertEqual(selected, expected)
+
+        app.skip_m0.set(False)
+        app._skip_m0_changed()
+        selected = tuple(task for task, variable in app.module_vars.items() if variable.get())
+        self.assertEqual(selected, ACQUISITION_BATCH_PRESETS[TWO_BATCH_B_LABEL][1])
 
     def test_short_protocol_is_opt_in_for_app_and_launchers(self) -> None:
         default_short = signature(BSenseExperimentApp.__init__).parameters["default_short"].default
@@ -190,7 +214,7 @@ class AppAsyncTests(unittest.TestCase):
         self.assertEqual(app.cue_label.options["text"], "✕ 错误")
         self.assertFalse(marker_extras["correct"])
         self.assertTrue(marker_extras["feedback_shown"])
-        self.assertTrue(app.step_text_replaced)
+        self.assertFalse(app.step_text_replaced)
         self.assertEqual(result, "break")
 
     def test_manual_completion_cannot_advance_a_timed_nback_step(self) -> None:
