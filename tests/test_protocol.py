@@ -111,6 +111,27 @@ class ProtocolTests(unittest.TestCase):
             {"kss_score", "mental_fatigue_score", "ready_to_continue"},
         )
 
+    def test_full_mode_stimulus_timing_prioritizes_content_over_fixation(self) -> None:
+        nback_plan = build_protocol_plan("m2_nback", seed=42)
+        stimuli = [step for step in nback_plan if step.event == "nback_stimulus"]
+        self.assertTrue(all(step.duration == 2.0 for step in stimuli))
+        self.assertTrue(all(step.text_duration == 1.5 for step in stimuli))
+        self.assertTrue(all(step.text_after == "+" for step in stimuli))
+
+        m1_plan = build_protocol_plan("m1_mi", seed=42)
+        fixations = [
+            step
+            for step in m1_plan
+            if step.text == "+" and step.block is not None and step.block.startswith("run_")
+        ]
+        self.assertTrue(fixations)
+        self.assertTrue(all(step.duration == 0.5 for step in fixations))
+
+        m4a_plan = build_protocol_plan("m4a_intent", seed=42)
+        intent_fixations = [step for step in m4a_plan if step.text == "+" and step.block == "intent"]
+        self.assertTrue(intent_fixations)
+        self.assertTrue(all(step.duration == 0.5 for step in intent_fixations))
+
     def test_nback_supports_counterbalanced_level_order(self) -> None:
         plan = build_protocol_plan("m2_nback", short=True, seed=1, nback_order="counterbalanced")
         block_levels = [step.metadata["level"] for step in plan if step.event == "block_start"]

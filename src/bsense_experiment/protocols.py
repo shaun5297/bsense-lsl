@@ -352,7 +352,7 @@ def build_m1_plan(
             }
             body.extend(
                 [
-                    Step("+", "注视中央十字", 0.5 if short else 2.0, block=f"run_{run_number}", trial=global_trial),
+                    Step("+", "注视中央十字", 0.5 if short else 0.5, block=f"run_{run_number}", trial=global_trial),
                     Step(
                         cue,
                         "准备执行提示条件",
@@ -474,7 +474,7 @@ def _nback_stimulus_steps(
                     "position_in_block": position_in_block,
                     **(extra_metadata or {}),
                 },
-                text_duration=min(0.5, duration / 2.0),
+                text_duration=(duration - 0.5) if duration > 1.0 else (duration / 2.0),
                 text_after="+",
             )
         )
@@ -820,7 +820,7 @@ def build_m4a_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step
         }
         body.extend(
             [
-                Step("+", "注视中央", 0.5 if short else 1.0, block="intent", trial=trial),
+                Step("+", "注视中央", 0.5, block="intent", trial=trial),
                 Step(
                     object_name,
                     label,
