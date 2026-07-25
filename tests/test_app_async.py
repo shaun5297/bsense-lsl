@@ -9,6 +9,7 @@ from bsense_experiment.app import (
     ACQUISITION_BATCH_PRESETS,
     BSenseExperimentApp,
     CUSTOM_ACQUISITION_BATCH,
+    QUICK_READINESS_LABEL,
     THREE_BATCH_1_LABEL,
     THREE_BATCH_2_LABEL,
     THREE_BATCH_3_LABEL,
@@ -66,6 +67,7 @@ class FakeVariable:
 class AppAsyncTests(unittest.TestCase):
     def test_acquisition_batch_presets_repeat_baseline_and_keep_fatigue_late(self) -> None:
         expected = {
+            QUICK_READINESS_LABEL: ("m6_readiness",),
             TWO_BATCH_A_LABEL: ("m0_baseline", "m1_mi", "m4a_intent", "m4b_target"),
             TWO_BATCH_B_LABEL: ("m0_baseline", "m2_nback", "m3a_safety", "m3b_fatigue", "m5_debrief"),
             THREE_BATCH_1_LABEL: ("m0_baseline", "m1_mi", "m4a_intent"),
@@ -73,9 +75,17 @@ class AppAsyncTests(unittest.TestCase):
             THREE_BATCH_3_LABEL: ("m0_baseline", "m3a_safety", "m3b_fatigue", "m5_debrief"),
         }
         self.assertEqual({label: preset[1] for label, preset in ACQUISITION_BATCH_PRESETS.items()}, expected)
-        self.assertTrue(all(tasks[0] == "m0_baseline" for tasks in expected.values()))
+        self.assertTrue(
+            all(tasks[0] == "m0_baseline" for label, tasks in expected.items() if label != QUICK_READINESS_LABEL)
+        )
         self.assertTrue(all("deviceqc" not in tasks for tasks in expected.values()))
-        self.assertTrue(all(tasks[-1] in {"m4a_intent", "m4b_target", "m5_debrief"} for tasks in expected.values()))
+        self.assertTrue(
+            all(
+                tasks[-1] in {"m4a_intent", "m4b_target", "m5_debrief"}
+                for label, tasks in expected.items()
+                if label != QUICK_READINESS_LABEL
+            )
+        )
 
     def test_applying_acquisition_batch_selects_modules_and_disables_short_mode(self) -> None:
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
@@ -283,6 +293,72 @@ class AppAsyncTests(unittest.TestCase):
 
         self.assertEqual(markers, ["done"])
         self.assertEqual(len(app.root.idle_callbacks), 1)
+
+    def test_sart_completion_records_commission_without_using_nback_markers(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.root = FakeRoot()
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.step_generation = 1
+        app.step_completion_started = False
+        app.step_started = time.monotonic() - 0.3
+        app.current_response_time = time.monotonic()
+        app.readiness_trials = []
+        app.block_results = {}
+        app.plan = [
+            Step(
+                "3",
+                "",
+                1.0,
+                block="sart_assessment",
+                trial=1,
+                response_key="space",
+                metadata={
+                    "stimulus": "3",
+                    "should_respond": False,
+                    "trial_kind": "assessment",
+                    "result_event": "sart_trial_result",
+                    "result_code": 723,
+                },
+            )
+        ]
+        markers: list[tuple[str, dict[str, object]]] = []
+        app._push_step_marker = (
+            lambda event, _code, _step, **values: markers.append((event, values))
+        )
+
+        app._complete_current_step(expected_generation=1, expected_step_index=0)
+
+        self.assertEqual(markers[0][0], "sart_trial_result")
+        self.assertEqual(markers[0][1]["outcome"], "commission")
+        self.assertEqual(app.readiness_trials[0]["outcome"], "commission")
+
+    def test_readiness_quality_gate_and_public_result_hide_detailed_metrics(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.current_context = {
+            "kss_score": 4,
+            "sleep_duration_band": "7–8小时",
+            "assessment_attempt": "首次",
+        }
+        app.readiness_trials = [
+            {
+                "should_respond": index % 9 != 0,
+                "outcome": "hit" if index % 9 != 0 else "correct_rejection",
+                "reaction_time_s": 0.4 if index % 9 != 0 else None,
+            }
+            for index in range(180)
+        ]
+        app.readiness_quality_samples = 100
+        app.readiness_quality_bad_samples = 11
+        app.readiness_quality_issues = {"eeg_flat"}
+
+        result = app._create_readiness_assessment(180)
+        detail = app._readiness_result_detail(result)
+
+        self.assertEqual(result["status"], "unable")
+        self.assertNotIn("正确率", detail)
+        self.assertNotIn("反应时", detail)
 
     def test_stale_tick_cannot_touch_the_new_step(self) -> None:
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)

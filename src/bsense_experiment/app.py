@@ -46,6 +46,7 @@ from .protocols import (
     build_protocol_plan,
     estimate_protocol_seconds,
 )
+from .readiness import assess_readiness, classify_sart_trial
 from .resources import object_asset_path
 
 if TYPE_CHECKING:
@@ -74,7 +75,13 @@ TWO_BATCH_B_LABEL = "两批方案 B｜核心认知与疲劳"
 THREE_BATCH_1_LABEL = "三批方案 1｜运动与意图"
 THREE_BATCH_2_LABEL = "三批方案 2｜认知与注意"
 THREE_BATCH_3_LABEL = "三批方案 3｜安全动作与疲劳"
+QUICK_READINESS_LABEL = "赛道7｜脑状态安检"
 ACQUISITION_BATCH_PRESETS: dict[str, tuple[str, tuple[str, ...], str]] = {
+    QUICK_READINESS_LABEL: (
+        "readiness_screen",
+        ("m6_readiness",),
+        "M6 上岗前快速筛查；自动计时约 4.7 分钟，另加状态确认。",
+    ),
     TWO_BATCH_A_LABEL: (
         "two_part_a",
         ("m0_baseline", "m1_mi", "m4a_intent", "m4b_target"),
@@ -381,6 +388,11 @@ class BSenseExperimentApp:
         self.current_response_time: float | None = None
         self.step_text_replaced = False
         self.block_results: dict[str, list[bool]] = {}
+        self.readiness_trials: list[dict[str, object]] = []
+        self.readiness_result: dict[str, object] | None = None
+        self.readiness_quality_samples = 0
+        self.readiness_quality_bad_samples = 0
+        self.readiness_quality_issues: set[str] = set()
         self.form_variables: dict[str, StringVar] = {}
         self.form_error = StringVar(value="")
         self.object_images: dict[str, PhotoImage] = {}
@@ -793,7 +805,11 @@ class BSenseExperimentApp:
                 manual_note = "（另含人工确认/问卷时间）"
                 break
         self.estimate_text.set(f"已选 {len(selected)} 个模块，自动计时约 {seconds / 60:.1f} 分钟{manual_note}")
-        physiological_tasks = {task for task in selected if task not in {"deviceqc", "m0_baseline", "m5_debrief"}}
+        physiological_tasks = {
+            task
+            for task in selected
+            if task not in {"deviceqc", "m0_baseline", "m5_debrief", "m6_readiness"}
+        }
         missing_baseline = (
             "m0_baseline" not in selected and bool(physiological_tasks) and not self.skip_m0.get()
         )
@@ -1026,6 +1042,7 @@ class BSenseExperimentApp:
     def _update_task_signal_status(self) -> None:
         self.task_signal_poll_id = None
         parts: list[str] = []
+        status_by_kind: dict[str, str] = {}
         has_error = False
         waiting = False
         motion_warning: tuple[Step, float, float] | None = None
@@ -1035,10 +1052,12 @@ class BSenseExperimentApp:
             window = self.task_signal_manager.window(kind, 3.0, max_points=240)
             if window is None or len(window.samples) < 2:
                 parts.append(f"{label} ○等待")
+                status_by_kind[kind] = "waiting"
                 waiting = True
                 continue
             if not window.is_live:
                 parts.append(f"{label} ✕中断")
+                status_by_kind[kind] = "interrupted"
                 has_error = True
                 continue
             rate = window.observed_srate
@@ -1046,9 +1065,11 @@ class BSenseExperimentApp:
             flat_count = flat_channel_count(window)
             if flat_count:
                 parts.append(f"{label} !恒定{flat_count}ch/{rate_text}")
+                status_by_kind[kind] = "flat"
                 has_error = True
             elif kind == "eeg" and (clipped_count := eeg_clipped_channel_count(window)):
                 parts.append(f"{label} !削顶{clipped_count}ch/{rate_text}")
+                status_by_kind[kind] = "clipped"
                 has_error = True
             elif (
                 kind == "motion"
@@ -1064,12 +1085,15 @@ class BSenseExperimentApp:
                 )
                 if detected:
                     parts.append(f"{label} !M1动作/{rate_text}")
+                    status_by_kind[kind] = "motion"
                     has_error = True
                     motion_warning = (self.plan[self.step_index], accel_span, gyro_span)
                 else:
                     parts.append(f"{label} ●{rate_text}")
+                    status_by_kind[kind] = "ready"
             else:
                 parts.append(f"{label} ●{rate_text}")
+                status_by_kind[kind] = "ready"
         if manager_errors:
             has_error = True
             parts.append("采集器 !异常")
@@ -1088,6 +1112,21 @@ class BSenseExperimentApp:
                 quality_status="requires_offline_review",
                 invalidates_trial=False,
             )
+        if (
+            self.active
+            and not self.stopping
+            and self.current_task == "m6_readiness"
+            and 0 <= self.step_index < len(self.plan)
+            and self.plan[self.step_index].event
+            in {"readiness_signal_gate_start", "readiness_baseline_start", "sart_stimulus"}
+        ):
+            self.readiness_quality_samples += 1
+            eeg_status = status_by_kind.get("eeg", "waiting")
+            if eeg_status != "ready" or manager_errors:
+                self.readiness_quality_bad_samples += 1
+                self.readiness_quality_issues.add(f"eeg_{eeg_status}")
+                if manager_errors:
+                    self.readiness_quality_issues.add("stream_manager_error")
         if self.root.winfo_exists():
             self.task_signal_poll_id = self.root.after(500, self._update_task_signal_status)
 
@@ -1406,6 +1445,11 @@ class BSenseExperimentApp:
         self.stopping = False
         self.current_response_time = None
         self.block_results = {}
+        self.readiness_trials = []
+        self.readiness_result = None
+        self.readiness_quality_samples = 0
+        self.readiness_quality_bad_samples = 0
+        self.readiness_quality_issues = set()
         self.pending_next_task = None
         self.recorder_started = False
         self.xdf_initial_size = 0
@@ -1547,6 +1591,33 @@ class BSenseExperimentApp:
         self.abort_button.pack(side="right")
         self.root.after(2000, self._advance_step)
 
+    def _create_readiness_assessment(self, expected_trials: int) -> dict[str, object]:
+        quality_bad_rate = (
+            self.readiness_quality_bad_samples / self.readiness_quality_samples
+            if self.readiness_quality_samples
+            else 1.0
+        )
+        signal_quality_ok = self.readiness_quality_samples > 0 and quality_bad_rate <= 0.1
+        result = assess_readiness(
+            self.current_context,
+            self.readiness_trials,
+            expected_trials=expected_trials,
+            signal_quality_ok=signal_quality_ok,
+            signal_quality_issues=self.readiness_quality_issues,
+        )
+        result["signal_quality_sample_count"] = self.readiness_quality_samples
+        result["signal_quality_bad_sample_count"] = self.readiness_quality_bad_samples
+        result["signal_quality_bad_rate"] = round(quality_bad_rate, 6)
+        return result
+
+    @staticmethod
+    def _readiness_result_detail(result: dict[str, object]) -> str:
+        return (
+            f"{result.get('recommendation', '')}\n\n"
+            f"{result.get('disclaimer', '')}\n"
+            "管理端只应接收本次状态等级；原始脑信号和明细指标不得用于惩罚或永久能力画像。"
+        )
+
     def _advance_step(self) -> None:
         if not self.active or self.stopping:
             return
@@ -1577,7 +1648,28 @@ class BSenseExperimentApp:
         self.secondary_button.pack_forget()
         self.abort_button.pack(side="right")
         self.quality_frame.pack(before=self.button_frame, fill="x", pady=(4, 0))
-        if step.event is not None:
+        if step.event == "readiness_assessment":
+            expected_trials = int(step.metadata.get("expected_trials", len(self.readiness_trials)))
+            self.readiness_result = self._create_readiness_assessment(expected_trials)
+            status_colors = {
+                "normal": "#14804a",
+                "retest": "#9a6700",
+                "rest": "#b42318",
+                "unable": "#59636e",
+            }
+            self.cue_label.configure(
+                text=str(self.readiness_result["label"]),
+                font=(UI_FONT_FAMILY, 64, "bold"),
+                foreground=status_colors.get(str(self.readiness_result["status"]), self.default_cue_foreground),
+            )
+            self.detail_label.configure(text=self._readiness_result_detail(self.readiness_result))
+            self._push_step_marker(
+                step.event,
+                step.code,
+                step,
+                assessment=self.readiness_result,
+            )
+        elif step.event is not None:
             self._push_step_marker(step.event, step.code, step)
         if step.start_sound is not None:
             self._play_audio_cue(step.start_sound, step, "start")
@@ -1642,18 +1734,28 @@ class BSenseExperimentApp:
             return "break"
         self.current_response_time = time.monotonic()
         elapsed = self.current_response_time - self.step_started
-        correct = bool(step.metadata.get("is_target"))
+        should_respond = bool(step.metadata.get("should_respond", step.metadata.get("is_target")))
+        false_start_threshold = step.metadata.get("false_start_threshold_s")
+        false_start = bool(
+            isinstance(false_start_threshold, (int, float)) and elapsed < float(false_start_threshold)
+        )
+        correct = should_respond and not false_start
         # 反馈只在字母仍显示时给出；进入注视十字阶段后按键不再覆盖 "+",
         # 保证每个试次末段的视觉刺激一致。
         stimulus_phase = step.text_duration is None or elapsed < step.text_duration
-        feedback_shown = bool(self.current_context.get("nback_feedback_enabled")) and stimulus_phase
+        feedback_shown = (
+            step.metadata.get("trial_kind") not in {"practice", "assessment"}
+            and bool(self.current_context.get("nback_feedback_enabled"))
+            and stimulus_phase
+        )
         self._push_step_marker(
-            "nback_response",
-            459,
+            str(step.metadata.get("response_event", "nback_response")),
+            int(step.metadata.get("response_code", 459)),
             step,
             response_key="space",
             reaction_time_s=round(elapsed, 6),
             correct=correct,
+            false_start=false_start,
             feedback_shown=feedback_shown,
         )
         if feedback_shown:
@@ -1685,6 +1787,12 @@ class BSenseExperimentApp:
                 self.form_error.set("当前状态不适合继续 M2；请按 Esc 中止本模块，休息后使用新 Run 重新采集。")
                 self.action_button.configure(state="normal")
                 return
+            if step.event == "readiness_context_start" and not collected.get("ready_to_test"):
+                self.form_error.set("当前不适合继续筛查；请按 Esc 中止，必要时按现场安全或医疗流程处理。")
+                self.action_button.configure(state="normal")
+                return
+            if step.event == "readiness_context_start":
+                self.current_context.update(collected)
             responses = collected
         if step.block is not None and step.block in self.block_results:
             results = self.block_results[step.block]
@@ -1725,21 +1833,42 @@ class BSenseExperimentApp:
         step = self.plan[self.step_index]
         if step.response_key is not None:
             responded = self.current_response_time is not None
-            is_target = bool(step.metadata.get("is_target"))
-            correct = responded == is_target
             reaction_time = (
                 round(self.current_response_time - self.step_started, 6)
                 if self.current_response_time is not None
                 else None
             )
+            if step.metadata.get("trial_kind") in {"practice", "assessment"}:
+                should_respond = bool(step.metadata.get("should_respond"))
+                trial_result = classify_sart_trial(
+                    should_respond,
+                    reaction_time,
+                    false_start_threshold_s=float(step.metadata.get("false_start_threshold_s", 0.1)),
+                )
+                correct = bool(trial_result["correct"])
+            else:
+                is_target = bool(step.metadata.get("is_target"))
+                correct = responded == is_target
+                trial_result = {
+                    "responded": responded,
+                    "correct": correct,
+                    "reaction_time_s": reaction_time,
+                }
             self._push_step_marker(
-                "nback_trial_result",
-                460,
+                str(step.metadata.get("result_event", "nback_trial_result")),
+                int(step.metadata.get("result_code", 460)),
                 step,
-                responded=responded,
-                correct=correct,
-                reaction_time_s=reaction_time,
+                **trial_result,
             )
+            if step.metadata.get("trial_kind") == "assessment":
+                self.readiness_trials.append(
+                    {
+                        "trial": step.trial,
+                        "stimulus": step.metadata.get("stimulus"),
+                        "should_respond": bool(step.metadata.get("should_respond")),
+                        **trial_result,
+                    }
+                )
             if step.block is not None:
                 self.block_results.setdefault(step.block, []).append(correct)
         if step.completion_event is not None:
@@ -1970,6 +2099,28 @@ class BSenseExperimentApp:
             return
 
         has_next = succeeded and self.module_index + 1 < len(self.module_queue)
+        if completed_task == "m6_readiness" and self.readiness_result is not None:
+            result = self.readiness_result
+            if has_next:
+                next_task = self.module_queue[self.module_index + 1]
+                self.pending_next_task = next_task
+                self._show_task_action(
+                    str(result["label"]),
+                    self._readiness_result_detail(result)
+                    + f"\n\n下一个模块：{PROTOCOL_BY_TASK[next_task].title}",
+                    "开始下一个模块",
+                    self._continue_to_next_module,
+                    secondary_text="暂不继续，返回首页",
+                    secondary_command=self._return_to_setup,
+                )
+            else:
+                self._show_task_action(
+                    str(result["label"]),
+                    self._readiness_result_detail(result),
+                    "返回首页",
+                    self._return_to_setup,
+                )
+            return
         if has_next:
             next_task = self.module_queue[self.module_index + 1]
             self.pending_next_task = next_task

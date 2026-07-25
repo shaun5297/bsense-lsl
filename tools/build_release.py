@@ -273,7 +273,11 @@ def write_checksum(archive_path: Path) -> Path:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     checksum_path = archive_path.with_suffix(archive_path.suffix + ".sha256")
-    checksum_path.write_text(f"{digest.hexdigest()}  {archive_path.name}\n", encoding="ascii")
+    checksum_path.write_text(
+        f"{digest.hexdigest()}  {archive_path.name}\n",
+        encoding="ascii",
+        newline="\n",
+    )
     return checksum_path
 
 

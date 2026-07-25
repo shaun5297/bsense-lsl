@@ -237,6 +237,41 @@ class ProtocolTests(unittest.TestCase):
             },
         )
 
+    def test_m6_readiness_is_reproducible_and_fits_five_minute_screen(self) -> None:
+        first = build_protocol_plan("m6_readiness", seed=42)
+        second = build_protocol_plan("m6_readiness", seed=42)
+        stimuli = [
+            step
+            for step in first
+            if step.event == "sart_stimulus" and step.metadata["trial_kind"] == "assessment"
+        ]
+        second_digits = [
+            step.metadata["stimulus"]
+            for step in second
+            if step.event == "sart_stimulus" and step.metadata["trial_kind"] == "assessment"
+        ]
+        digits = [step.metadata["stimulus"] for step in stimuli]
+
+        self.assertEqual(len(stimuli), 180)
+        self.assertEqual(digits, second_digits)
+        self.assertEqual(digits.count("3"), 20)
+        self.assertFalse(any(left == right == "3" for left, right in zip(digits, digits[1:])))
+        self.assertTrue(all(step.response_key == "space" for step in stimuli))
+        self.assertTrue(all(step.metadata["result_event"] == "sart_trial_result" for step in stimuli))
+        self.assertLessEqual(sum(step.duration for step in first), 300.0)
+        self.assertGreaterEqual(sum(step.duration for step in first), 240.0)
+        context = next(step for step in first if step.event == "readiness_context_start")
+        self.assertEqual(
+            {field.key for field in context.fields},
+            {
+                "kss_score",
+                "sleep_duration_band",
+                "shift_type",
+                "assessment_attempt",
+                "ready_to_test",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

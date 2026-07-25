@@ -82,6 +82,8 @@ Recorder built-in XDF
 - M4B 每轮恰有一个 `is_target=true` 的高亮；
 - M4A Marker 明确为 `externally_cued_intent`，M4B fNIRS 分析范围明确为 `block_level_only`；
 - 执行 M5 时，结束问卷所有结构化字段均已提交；
+- 执行 M6 时，正式 `sart_stimulus`/`sart_trial_result` 各 180 条、No-Go 共 20 条且不连续；每个按键最多一个 `sart_response`，小于 100 ms 的响应标为 `false_start`；
+- M6 必须存在一次 `readiness_assessment`，结果只能是四态之一，并包含规则版本、原因码、有效试次数和 EEG 质量门控统计；首次检测不得直接输出“建议休息”；
 - 被中止的模块保留 `experiment_abort`，不得标记为成功数据。
 - 所有实际播放的过渡提示均存在含 `audio_text`、`audio_voice` 的 `audio_cue` Marker；
 - 六个缓存语音 WAV 存在且为 24 kHz、单声道、16-bit PCM；

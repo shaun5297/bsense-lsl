@@ -62,6 +62,7 @@ BioMultiLite 的 fNIRS 流保存的是设备发布的 735/850 nm 原始光学通
 - M3B：`segment`、`position_in_block`、`elapsed_minutes`、`sequence_reset`、`kss_score`、`mental_fatigue_score`，并有任务后恢复边界；
 - M4A：`has_intent`、`object`、`condition`、`paradigm=externally_cued_intent` 以及模块级主观评分；
 - M4B：`round`、`position`、`object`、`target_object`、`is_target`、`eeg_analysis_scope`、`fnirs_analysis_scope`；
+- M6：状态表单包含 `kss_score`、`sleep_duration_band`、`shift_type`、`assessment_attempt`；SART 包含 `should_respond`、`outcome`、`false_start`、`reaction_time_s`；`readiness_assessment.assessment` 保存四态结果、原因码、行为汇总、EEG 质量门控统计和 `algorithm_version=rules_v1_provisional`；
 - M5：`kss_score`、`mi_difficulty`、`easiest_task`、`hardest_task`、`device_comfort` 和三类不适布尔值；
 - 提示音：`audio_cue`、`audio_phase`、`audio_text`、`audio_voice`；操作员异常标签使用编码 900–902，自动 M1 动作复核候选使用编码 903。
 
@@ -82,6 +83,8 @@ rt_ms, correct, kss_score, subjective_effort
 信号数组单独保存，并在元数据中记录实际形状。不得假设 EEG 固定为 `2 × 100` 或 fNIRS 固定为 `2 × 8 × 40`：窗口长度、实测采样率、原始波长/派生血红蛋白表示都可能不同。`reaction_time_s` 可在导出时无损换算为 `rt_ms`。
 
 `eeg_quality`、`fnirs_quality` 和 `motion_artifact` 只有在质量规则已冻结并经过验证后才能生成。M3A 的 `motion_expected` 适合作为伪迹检测候选窗口，不应直接复制为两个模态的污染真值。
+
+M6 的 `signal_quality_ok` 仅表示采集期 EEG 在线门控是否通过，不是脑健康或能力结论。`assessment` 中的四态结果必须连同 `algorithm_version`、原因码和免责声明解释；对外管理界面只可暴露本次等级与建议，不应复制原始 XDF、逐试次反应或身份资料。
 
 ## 受限被试资料
 

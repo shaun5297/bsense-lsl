@@ -61,6 +61,7 @@ PROTOCOLS = (
     ProtocolInfo("m3b_fatigue", "M3B 疲劳诱导", "分段持续 1-back，每 2 分钟评分", "重要"),
     ProtocolInfo("m4a_intent", "M4A 提示后意图", "有提示的拿取意图与无意图二分类", "探索"),
     ProtocolInfo("m4b_target", "M4B 目标注意（探索）", "三物体串行高亮中的目标注意", "探索"),
+    ProtocolInfo("m6_readiness", "M6 脑状态安检", "上岗前 3–5 分钟认知状态快速筛查", "赛道7"),
     ProtocolInfo("m5_debrief", "M5 结束问卷", "整体体验、困倦、舒适度与不适记录", "建议"),
 )
 
@@ -991,6 +992,182 @@ def build_m5_plan(short: bool = False, **_: object) -> list[Step]:
     return _experiment_bounds("m5_debrief", body)
 
 
+def _sart_sequence(count: int, rng: random.Random) -> list[str]:
+    """Build a reproducible sequence with roughly 11% no-go trials and no adjacent no-go."""
+
+    no_go_count = max(1, round(count / 9))
+    candidates = list(range(1, count - 1)) if count >= 4 else list(range(count))
+    for _attempt in range(200):
+        no_go_positions = sorted(rng.sample(candidates, no_go_count))
+        if all(right - left > 1 for left, right in zip(no_go_positions, no_go_positions[1:])):
+            break
+    else:
+        raise RuntimeError("无法生成满足间隔限制的 SART 序列")
+
+    go_digits = [digit for digit in "12456789" for _ in range((count // 8) + 1)]
+    rng.shuffle(go_digits)
+    no_go_set = set(no_go_positions)
+    sequence: list[str] = []
+    go_index = 0
+    for position in range(count):
+        if position in no_go_set:
+            sequence.append("3")
+        else:
+            sequence.append(go_digits[go_index])
+            go_index += 1
+    return sequence
+
+
+def _sart_steps(
+    sequence: list[str],
+    *,
+    block: str,
+    trial_kind: str,
+    duration: float,
+) -> list[Step]:
+    steps: list[Step] = []
+    for trial, digit in enumerate(sequence, start=1):
+        should_respond = digit != "3"
+        steps.append(
+            Step(
+                digit,
+                "除数字 3 外均按空格；看到 3 时不要按",
+                duration,
+                "sart_stimulus",
+                721,
+                block,
+                trial,
+                response_key="space",
+                metadata={
+                    "stimulus": digit,
+                    "should_respond": should_respond,
+                    "is_no_go": not should_respond,
+                    "trial_kind": trial_kind,
+                    "exclude_from_primary_analysis": trial_kind == "practice",
+                    "response_event": "sart_response",
+                    "response_code": 722,
+                    "result_event": "sart_trial_result",
+                    "result_code": 723,
+                    "false_start_threshold_s": 0.1,
+                },
+                text_duration=duration / 4.0,
+                text_after="+",
+            )
+        )
+    return steps
+
+
+def build_m6_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]:
+    """Build the competition prototype for a pre-shift readiness screen."""
+
+    rng = random.Random(seed)
+    assessment_trial_count = 18 if short else 180
+    context_fields = (
+        InputField("kss_score", "当前困倦程度 KSS（1=非常清醒，9=极度困倦）", "rating", 1, 9),
+        InputField(
+            "sleep_duration_band",
+            "过去 24 小时累计睡眠",
+            "choice",
+            choices=("少于5小时", "5–6小时", "6–7小时", "7–8小时", "8小时及以上"),
+        ),
+        InputField(
+            "shift_type",
+            "本次班次",
+            "choice",
+            choices=("日班", "夜班", "倒班/跨时段", "不适用"),
+        ),
+        InputField(
+            "assessment_attempt",
+            "本次属于",
+            "choice",
+            choices=("首次", "复测"),
+        ),
+        InputField("ready_to_test", "本人无急性不适并自愿继续本次筛查", "boolean"),
+    )
+    body: list[Step] = [
+        Step(
+            "脑状态安检",
+            "本流程只输出当班风险等级，不展示原始脑信号，不用于医疗诊断、自动上岗或处罚。",
+            2.0 if short else 5.0,
+            "readiness_intro",
+            709,
+        ),
+        Step(
+            "状态确认",
+            "身份沿用匿名被试编号；请按当前真实状态填写。",
+            0.0,
+            "readiness_context_start",
+            710,
+            advance="form",
+            completion_event="readiness_context",
+            completion_code=711,
+            fields=context_fields,
+        ),
+        Step(
+            "+",
+            "信号质量门控：保持睁眼、自然呼吸并尽量不动。",
+            2.0 if short else 30.0,
+            "readiness_signal_gate_start",
+            712,
+            completion_event="readiness_signal_gate_end",
+            completion_code=713,
+        ),
+        Step(
+            "+",
+            "睁眼个体当次基线：注视中央，保持放松和清醒。",
+            2.0 if short else 45.0,
+            "readiness_baseline_start",
+            714,
+            completion_event="readiness_baseline_end",
+            completion_code=715,
+        ),
+        Step(
+            "任务说明",
+            "数字会快速出现：除 3 外都按空格；看到 3 时不要按。过早按键将记为抢按。",
+            2.0 if short else 5.0,
+            "sart_instruction",
+            719,
+        ),
+        *_sart_steps(
+            ["1", "2", "3", "4"],
+            block="sart_practice",
+            trial_kind="practice",
+            duration=0.5 if short else 1.0,
+        ),
+        Step(
+            "正式任务开始",
+            f"共 {assessment_trial_count} 个试次；在保证正确的前提下尽快响应。",
+            1.0 if short else 2.0,
+            "sart_start",
+            720,
+            metadata={"expected_trials": assessment_trial_count},
+        ),
+        *_sart_steps(
+            _sart_sequence(assessment_trial_count, rng),
+            block="sart_assessment",
+            trial_kind="assessment",
+            duration=0.5 if short else 1.0,
+        ),
+        Step(
+            "任务结束",
+            "正在汇总有效试次、反应稳定性和信号质量。",
+            0.5 if short else 1.0,
+            "sart_end",
+            724,
+            metadata={"expected_trials": assessment_trial_count},
+        ),
+        Step(
+            "正在生成结果",
+            "结果仅供当班状态筛查与复测辅助。",
+            0.5 if short else 4.0,
+            "readiness_assessment",
+            730,
+            metadata={"expected_trials": assessment_trial_count},
+        ),
+    ]
+    return _experiment_bounds("m6_readiness", body)
+
+
 def build_protocol_plan(
     task: str,
     *,
@@ -1009,6 +1186,7 @@ def build_protocol_plan(
         "m3b_fatigue": build_m3b_plan,
         "m4a_intent": build_m4a_plan,
         "m4b_target": build_m4b_plan,
+        "m6_readiness": build_m6_plan,
         "m5_debrief": build_m5_plan,
     }
     try:

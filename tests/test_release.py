@@ -59,6 +59,13 @@ class ReleaseBuildTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "ZIP 缺少发行内容"):
                 self.release.verify_archive(archive_path, "windows")
 
+    def test_checksum_file_uses_cross_platform_lf(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive_path = Path(temporary_directory) / "release.zip"
+            archive_path.write_bytes(b"release")
+            checksum_path = self.release.write_checksum(archive_path)
+            self.assertNotIn(b"\r", checksum_path.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
