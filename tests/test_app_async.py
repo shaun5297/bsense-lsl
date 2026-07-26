@@ -305,6 +305,7 @@ class AppAsyncTests(unittest.TestCase):
         app.step_started = time.monotonic() - 0.3
         app.current_response_time = time.monotonic()
         app.readiness_trials = []
+        app.readiness_invalidated_steps = set()
         app.block_results = {}
         app.plan = [
             Step(
@@ -334,12 +335,146 @@ class AppAsyncTests(unittest.TestCase):
         self.assertEqual(markers[0][1]["outcome"], "commission")
         self.assertEqual(app.readiness_trials[0]["outcome"], "commission")
 
+    def test_sart_response_uses_sart_event_and_marks_false_start(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.plan = [
+            Step(
+                "5",
+                "",
+                1.0,
+                block="sart_assessment",
+                trial=2,
+                response_key="space",
+                metadata={
+                    "stimulus": "5",
+                    "should_respond": True,
+                    "trial_kind": "assessment",
+                    "response_event": "sart_response",
+                    "response_code": 722,
+                    "false_start_threshold_s": 0.1,
+                },
+            )
+        ]
+        app.current_response_time = None
+        app.current_context = {}
+        app.step_started = time.monotonic() - 0.05
+        app.step_text_replaced = False
+        app.cue_label = FakeLabel()
+        markers: list[tuple[str, dict[str, object]]] = []
+        app._push_step_marker = (
+            lambda event, _code, _step, **values: markers.append((event, values))
+        )
+
+        result = app._on_response_key(None)
+
+        self.assertEqual(result, "break")
+        self.assertEqual(markers[0][0], "sart_response")
+        self.assertTrue(markers[0][1]["false_start"])
+        self.assertFalse(markers[0][1]["correct"])
+        self.assertFalse(markers[0][1]["feedback_shown"])
+
+    def test_nback_response_does_not_include_false_start_field(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.plan = [Step("B", "", 2.0, response_key="space", metadata={"is_target": True})]
+        app.current_response_time = None
+        app.current_context = {}
+        app.step_started = time.monotonic()
+        app.step_text_replaced = False
+        app.cue_label = FakeLabel()
+        markers: list[tuple[str, dict[str, object]]] = []
+        app._push_step_marker = (
+            lambda event, _code, _step, **values: markers.append((event, values))
+        )
+
+        app._on_response_key(None)
+
+        self.assertEqual(markers[0][0], "nback_response")
+        self.assertNotIn("false_start", markers[0][1])
+
+    def _sart_step(self, trial_kind: str, trial: int = 1) -> Step:
+        return Step(
+            "5",
+            "",
+            1.0,
+            block="sart_assessment" if trial_kind == "assessment" else "sart_practice",
+            trial=trial,
+            response_key="space",
+            metadata={
+                "stimulus": "5",
+                "should_respond": True,
+                "trial_kind": trial_kind,
+                "result_event": "sart_trial_result",
+                "result_code": 723,
+            },
+        )
+
+    def _complete_sart_step(
+        self,
+        app: BSenseExperimentApp,
+        step: Step,
+        invalidated: set[int] | None = None,
+    ) -> None:
+        app.root = FakeRoot()
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.step_generation = 1
+        app.step_completion_started = False
+        app.step_started = time.monotonic() - 0.3
+        app.current_response_time = time.monotonic()
+        app.readiness_trials = []
+        app.readiness_invalidated_steps = invalidated or set()
+        app.block_results = {}
+        app.plan = [step]
+        app._push_step_marker = lambda *_args, **_values: None
+        app._complete_current_step(expected_generation=1, expected_step_index=0)
+
+    def test_practice_trials_are_excluded_from_readiness_scoring(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        self._complete_sart_step(app, self._sart_step("practice"))
+        self.assertEqual(app.readiness_trials, [])
+
+    def test_invalidated_assessment_trial_is_excluded_from_readiness_scoring(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        step = self._sart_step("assessment")
+        self._complete_sart_step(app, step)
+        self.assertEqual(len(app.readiness_trials), 1)
+
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        self._complete_sart_step(app, step, invalidated={0})
+        self.assertEqual(app.readiness_trials, [])
+
+    def test_trial_invalid_marker_marks_assessment_step_for_exclusion(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.plan = [self._sart_step("assessment")]
+        app.current_context = {}
+        app.readiness_invalidated_steps = set()
+        app.progress_label = FakeLabel()
+        app.task_frame = type("FakeFrame", (), {"focus_set": lambda self: None})()
+        pushed: list[dict[str, object]] = []
+        app._push_marker = lambda payload: pushed.append(payload)
+
+        app._send_quality_marker("trial_invalid", 900)
+
+        self.assertEqual(pushed[0]["event"], "trial_invalid")
+        self.assertEqual(app.readiness_invalidated_steps, {0})
+
     def test_readiness_quality_gate_and_public_result_hide_detailed_metrics(self) -> None:
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.current_context = {
             "kss_score": 4,
             "sleep_duration_band": "7–8小时",
             "assessment_attempt": "首次",
+            "shift_type": "日班",
         }
         app.readiness_trials = [
             {

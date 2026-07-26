@@ -32,7 +32,9 @@ def classify_sart_trial(
     responded = response_time_s is not None
     false_start = bool(responded and response_time_s < false_start_threshold_s)
     if false_start:
-        outcome = "false_start"
+        # No-Go 试次上的抢按同时是抑制失败，按 commission 归类；
+        # false_start 标志仍保留，供 false_start_rate 统计。
+        outcome = "false_start" if should_respond else "commission"
         correct = False
     elif should_respond and responded:
         outcome = "hit"
@@ -65,6 +67,11 @@ def summarize_sart_trials(trials: Iterable[Mapping[str, object]]) -> dict[str, o
         outcome: sum(row.get("outcome") == outcome for row in rows)
         for outcome in ("hit", "omission", "commission", "correct_rejection", "false_start")
     }
+    # false_start 以标志位为准：No-Go 抢按的 outcome 归类为 commission，
+    # 但仍是抢按，需要计入 false_start_rate。
+    false_start_count = sum(
+        bool(row.get("false_start", row.get("outcome") == "false_start")) for row in rows
+    )
     valid_hit_rts = [
         float(row["reaction_time_s"])
         for row in rows
@@ -89,11 +96,11 @@ def summarize_sart_trials(trials: Iterable[Mapping[str, object]]) -> dict[str, o
         "omission_count": counts["omission"],
         "commission_count": counts["commission"],
         "correct_rejection_count": counts["correct_rejection"],
-        "false_start_count": counts["false_start"],
+        "false_start_count": false_start_count,
         "accuracy": ratio(correct_count, len(rows)),
         "omission_rate": ratio(counts["omission"], go_trials),
         "commission_rate": ratio(counts["commission"], no_go_trials),
-        "false_start_rate": ratio(counts["false_start"], len(rows)),
+        "false_start_rate": ratio(false_start_count, len(rows)),
         "median_reaction_time_s": round(median_rt, 6) if median_rt is not None else None,
         "reaction_time_cv": round(rt_cv, 6) if rt_cv is not None else None,
     }
@@ -121,15 +128,17 @@ def assess_readiness(
 
     try:
         kss_score = int(context["kss_score"])
+        kss_missing = False
     except (KeyError, TypeError, ValueError):
         kss_score = 0
+        kss_missing = True
         reason_codes.append("missing_kss")
 
     if not signal_quality_ok:
         reason_codes.append("signal_quality_gate_failed")
     if int(metrics["trial_count"]) < minimum_trials:
         reason_codes.append("insufficient_valid_trials")
-    if not 1 <= kss_score <= 9:
+    if not kss_missing and not 1 <= kss_score <= 9:
         reason_codes.append("invalid_kss")
     if context.get("sleep_duration_band") not in {
         "少于5小时",
@@ -139,6 +148,8 @@ def assess_readiness(
         "8小时及以上",
     }:
         reason_codes.append("invalid_sleep_duration_band")
+    if context.get("shift_type") not in {"日班", "夜班", "倒班/跨时段", "不适用"}:
+        reason_codes.append("invalid_shift_type")
     if context.get("assessment_attempt") not in {"首次", "复测"}:
         reason_codes.append("invalid_assessment_attempt")
 

@@ -1050,7 +1050,7 @@ def _sart_steps(
                     "result_code": 723,
                     "false_start_threshold_s": 0.1,
                 },
-                text_duration=duration / 4.0,
+                text_duration=duration / 2.0,
                 text_after="+",
             )
         )

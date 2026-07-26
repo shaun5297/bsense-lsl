@@ -62,7 +62,7 @@ BioMultiLite 的 fNIRS 流保存的是设备发布的 735/850 nm 原始光学通
 - M3B：`segment`、`position_in_block`、`elapsed_minutes`、`sequence_reset`、`kss_score`、`mental_fatigue_score`，并有任务后恢复边界；
 - M4A：`has_intent`、`object`、`condition`、`paradigm=externally_cued_intent` 以及模块级主观评分；
 - M4B：`round`、`position`、`object`、`target_object`、`is_target`、`eeg_analysis_scope`、`fnirs_analysis_scope`；
-- M6：状态表单包含 `kss_score`、`sleep_duration_band`、`shift_type`、`assessment_attempt`；SART 包含 `should_respond`、`outcome`、`false_start`、`reaction_time_s`；`readiness_assessment.assessment` 保存四态结果、原因码、行为汇总、EEG 质量门控统计和 `algorithm_version=rules_v1_provisional`；
+- M6：状态表单包含 `kss_score`、`sleep_duration_band`、`shift_type`、`assessment_attempt`；SART 包含 `should_respond`、`outcome`、`false_start`、`reaction_time_s`；`readiness_assessment.assessment` 保存四态结果、原因码、行为汇总、EEG 质量门控统计和 `algorithm_version=rules_v1_provisional`；练习试次和被操作员标记 `trial_invalid` 的正式试次不进入四态汇总；
 - M5：`kss_score`、`mi_difficulty`、`easiest_task`、`hardest_task`、`device_comfort` 和三类不适布尔值；
 - 提示音：`audio_cue`、`audio_phase`、`audio_text`、`audio_voice`；操作员异常标签使用编码 900–902，自动 M1 动作复核候选使用编码 903。
 
