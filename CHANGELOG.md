@@ -10,7 +10,7 @@
 - 修复 `event_codes.csv` 中 deviceqc 事件名与实际 Marker 不一致的问题（`blink`/`jaw_clench`/`head_left`/`head_right`/`head_nod`/`head_cancel`），移除从未发送的 121/131 结束码；
 - 修复 RCS 模式下进入下一模块时重新解析端口文本可能抛出异常的问题，现复用启动时已校验的端口；
 - 计时节拍由 100 ms 加密至 50 ms，试次间隔抖动减半；N-Back 颜色反馈只在字母显示阶段给出，注视十字阶段的晚响应不再覆盖“+”（Marker 记 `feedback_shown=false`），且反馈显示后试次最后 0.5 秒仍会切换回注视十字。
-- M6 判定修正：No-Go 上的抢按现同时归为 `commission`（抑制错误率不再漏计）并保留 `false_start` 标志；`shift_type` 缺失/无效与文档一致地判为“无法评估”；KSS 缺失不再重复产生 `invalid_kss`；练习试次与被 `trial_invalid` 标记的正式试次不进入计分；`false_start` 字段只在 SART 响应 Marker 中输出，不再写入 N-Back Marker。
+- M6 判定修正：No-Go 上的抢按现同时归为 `commission`（抑制错误率不再漏计）并保留 `false_start` 标志；`shift_type` 缺失/无效与文档一致地判为“无法评估”；KSS 缺失不再重复产生 `invalid_kss`；练习试次与被 `trial_invalid` 标记的正式试次不进入计分；`false_start` 字段只在 SART 响应 Marker 中输出，不再写入 N-Back Marker；SART 数字显示由 0.25 秒延长至 0.5 秒（每个试次仍为 1 秒，总时长不变）。
 
 ## 0.8.0
 
