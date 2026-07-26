@@ -52,13 +52,13 @@ macOS 双机模式额外检查：
 
 ## 六类数值流同时被误报重复
 
-Windows 存在多个活动网卡（例如有线、Wi-Fi、VPN 或虚拟网卡）时，同一个 LSL outlet 可能经不同网络路径被解析多次。修复后的内置录制器会依据 liblsl 运行时 UID 合并同一 outlet 的重复视图，并在 `_recorder.jsonl` 的 `stream_inventory` 中记录：
+Windows 或 macOS 存在多个活动网卡（例如有线、Wi-Fi、VPN 或虚拟网卡）时，同一个 LSL outlet 可能经不同网络路径被解析多次，部分 liblsl/发布端组合甚至会为这些视图返回不同 UID。修复后的内置录制器依次依据 `source_id`、outlet 的 `created_at + hostname + 名称/类型/通道元数据`、UID 合并同一发布实例，并在 `_recorder.jsonl` 中记录：
 
 - `discovered_count`：解析器返回的原始数量；
-- `unique_discovered_count`：按运行时 UID 去重后的数量；
+- `unique_discovered_count`：按同一发布实例指纹去重后的数量；
 - `resolver_duplicate_count`：被安全忽略的重复网络视图数量。
 
-UID 不同的同类流仍会被视为两台设备或两组真实发布流并阻止录制，不能通过名称强行合并。若更新后仍提示重复，请关闭多余的 BioMultiLite/LSL 发布实例，而不是禁用这项安全检查。
+`stream_discovery` 会在严格选择之前保存每条候选流的名称、类型、主机、`source_id`、UID、`created_at`、通道数和采样率，因此即使启动失败也能审计。创建时间或元数据不同的同类流仍会被视为两台设备或两组真实发布流并阻止录制，不能只按名称强行合并。若更新后仍提示重复，请提供对应 `_recorder.jsonl` 并关闭多余的 BioMultiLite/LSL 发布实例，而不是禁用这项安全检查。
 
 厂商流未提供 `source_id` 时，程序会关闭 pylsl 无法生效的自动恢复选项，因此不再反复输出“can't be recovered automatically”警告。发布端一旦重启，仍需返回首页重新扫描并使用新的 Run 开始采集。
 

@@ -108,12 +108,27 @@ class InvertingTimestampInlet(FakeInlet):
 class ResolvedStreamView:
     """Represent the same LSL outlet discovered through another network path."""
 
-    def __init__(self, info: StreamInfo, uid: str) -> None:
+    def __init__(
+        self,
+        info: StreamInfo,
+        uid: str,
+        *,
+        created_at: float = 0.0,
+        source_id: str = "",
+    ) -> None:
         self._info = info
         self._uid = uid
+        self._created_at = created_at
+        self._source_id = source_id
 
     def uid(self) -> str:
         return self._uid
+
+    def created_at(self) -> float:
+        return self._created_at
+
+    def source_id(self) -> str:
+        return self._source_id
 
     def __getattr__(self, name: str):
         return getattr(self._info, name)
@@ -275,14 +290,22 @@ class XDFWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "重复.*EEG"):
             client._select_required_streams(required + (duplicate_eeg,))
 
-    def test_resolver_views_with_the_same_runtime_uid_are_recorded_once(self) -> None:
+    def test_multihomed_views_with_different_uids_are_recorded_once(self) -> None:
         required = self._required_infos()
         first_views = tuple(
-            ResolvedStreamView(info, f"runtime-{index}")
+            ResolvedStreamView(
+                info,
+                f"first-path-{index}",
+                created_at=1000.0 + index,
+            )
             for index, info in enumerate(required)
         )
         second_views = tuple(
-            ResolvedStreamView(info, f"runtime-{index}")
+            ResolvedStreamView(
+                info,
+                f"second-path-{index}",
+                created_at=1000.0 + index,
+            )
             for index, info in enumerate(required)
         )
         client = EmbeddedRecorderClient(
@@ -303,8 +326,16 @@ class XDFWriterTests(unittest.TestCase):
 
     def test_distinct_runtime_uids_are_still_rejected_as_duplicate_devices(self) -> None:
         required = self._required_infos()
-        duplicate_eeg = ResolvedStreamView(required[0], "second-device-eeg")
-        first_eeg = ResolvedStreamView(required[0], "first-device-eeg")
+        duplicate_eeg = ResolvedStreamView(
+            required[0],
+            "second-device-eeg",
+            created_at=2000.0,
+        )
+        first_eeg = ResolvedStreamView(
+            required[0],
+            "first-device-eeg",
+            created_at=1000.0,
+        )
         client = EmbeddedRecorderClient()
         unique, resolver_duplicates = client._deduplicate_resolved_streams(
             (first_eeg, duplicate_eeg)

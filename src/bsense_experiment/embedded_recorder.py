@@ -97,19 +97,55 @@ class EmbeddedRecorderClient:
         return str(info.type()).strip().lower() in {"marker", "markers"}
 
     @staticmethod
-    def _runtime_stream_key(info: Any) -> tuple[str, object]:
-        """Identify repeated resolver views without hiding distinct active outlets."""
-
+    def _info_value(info: Any, method_name: str, default: object) -> object:
         try:
-            uid = str(info.uid()).strip()
+            return getattr(info, method_name)()
         except (AttributeError, RuntimeError, TypeError, ValueError):
-            uid = ""
+            return default
+
+    @classmethod
+    def _runtime_stream_key(cls, info: Any) -> tuple[str, object]:
+        """Identify one outlet even when multihomed discovery changes its UID view."""
+
+        name = str(cls._info_value(info, "name", "")).strip()
+        stream_type = str(cls._info_value(info, "type", "")).strip()
+        hostname = str(cls._info_value(info, "hostname", "")).strip()
+        channel_count = int(cls._info_value(info, "channel_count", 0))
+        channel_format = int(cls._info_value(info, "channel_format", 0))
+        nominal_srate = float(cls._info_value(info, "nominal_srate", 0.0))
+        metadata = (hostname, name, stream_type, channel_count, channel_format, nominal_srate)
+
+        source_id = str(cls._info_value(info, "source_id", "")).strip()
+        if source_id:
+            return "source_id", (source_id, *metadata)
+
+        created_at = float(cls._info_value(info, "created_at", 0.0))
+        if created_at > 0 and name and stream_type:
+            # created_at belongs to the outlet instance and is copied unchanged
+            # into each resolver view, unlike the UID observed with some
+            # multihomed liblsl/provider combinations.
+            return "outlet_instance", (round(created_at, 9), *metadata)
+
+        uid = str(cls._info_value(info, "uid", "")).strip()
         if uid:
             return "uid", uid
         # Some test doubles and malformed outlets have no runtime UID. Repeated
         # references to the exact same object are safe to collapse; separate
         # objects remain ambiguous and are rejected by strict selection below.
         return "object", id(info)
+
+    @classmethod
+    def _stream_summary(cls, info: Any) -> dict[str, object]:
+        return {
+            "name": str(cls._info_value(info, "name", "")),
+            "type": str(cls._info_value(info, "type", "")),
+            "hostname": str(cls._info_value(info, "hostname", "")),
+            "source_id": str(cls._info_value(info, "source_id", "")),
+            "uid": str(cls._info_value(info, "uid", "")),
+            "created_at": float(cls._info_value(info, "created_at", 0.0)),
+            "channel_count": int(cls._info_value(info, "channel_count", 0)),
+            "nominal_srate": float(cls._info_value(info, "nominal_srate", 0.0)),
+        }
 
     def _deduplicate_resolved_streams(
         self,
@@ -183,6 +219,14 @@ class EmbeddedRecorderClient:
         if not resolved_infos:
             raise RuntimeError("没有发现任何 LSL 流，无法开始内置 XDF 录制")
         discovered_infos, resolver_duplicates = self._deduplicate_resolved_streams(resolved_infos)
+        self._record_diagnostic(
+            "stream_discovery",
+            discovered_count=len(resolved_infos),
+            unique_discovered_count=len(discovered_infos),
+            resolver_duplicate_count=len(resolver_duplicates),
+            discovered_streams=[self._stream_summary(info) for info in resolved_infos],
+            ignored_duplicate_streams=[self._stream_summary(info) for info in resolver_duplicates],
+        )
         if self.required_stream_name is not None:
             required_markers = [info for info in discovered_infos if str(info.name()) == self.required_stream_name]
             if not required_markers:
