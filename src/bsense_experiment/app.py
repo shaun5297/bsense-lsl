@@ -389,6 +389,7 @@ class BSenseExperimentApp:
         self.step_text_replaced = False
         self.block_results: dict[str, list[bool]] = {}
         self.readiness_trials: list[dict[str, object]] = []
+        self.readiness_invalidated_steps: set[int] = set()
         self.readiness_result: dict[str, object] | None = None
         self.readiness_quality_samples = 0
         self.readiness_quality_bad_samples = 0
@@ -1265,6 +1266,12 @@ class BSenseExperimentApp:
             "unix_time": time.time(),
         }
         self._push_marker(payload)
+        if (
+            event == "trial_invalid"
+            and step is not None
+            and step.metadata.get("trial_kind") == "assessment"
+        ):
+            self.readiness_invalidated_steps.add(self.step_index)
         self.progress_label.configure(text=f"已记录：{event}  |  步骤 {self.step_index + 1}/{len(self.plan)}")
         self.task_frame.focus_set()
 
@@ -1446,6 +1453,7 @@ class BSenseExperimentApp:
         self.current_response_time = None
         self.block_results = {}
         self.readiness_trials = []
+        self.readiness_invalidated_steps = set()
         self.readiness_result = None
         self.readiness_quality_samples = 0
         self.readiness_quality_bad_samples = 0
@@ -1748,15 +1756,19 @@ class BSenseExperimentApp:
             and bool(self.current_context.get("nback_feedback_enabled"))
             and stimulus_phase
         )
+        response_extras: dict[str, object] = {
+            "response_key": "space",
+            "reaction_time_s": round(elapsed, 6),
+            "correct": correct,
+            "feedback_shown": feedback_shown,
+        }
+        if isinstance(false_start_threshold, (int, float)):
+            response_extras["false_start"] = false_start
         self._push_step_marker(
             str(step.metadata.get("response_event", "nback_response")),
             int(step.metadata.get("response_code", 459)),
             step,
-            response_key="space",
-            reaction_time_s=round(elapsed, 6),
-            correct=correct,
-            false_start=false_start,
-            feedback_shown=feedback_shown,
+            **response_extras,
         )
         if feedback_shown:
             feedback_text = "✓ 正确" if correct else "✕ 错误"
@@ -1860,7 +1872,7 @@ class BSenseExperimentApp:
                 step,
                 **trial_result,
             )
-            if step.metadata.get("trial_kind") == "assessment":
+            if step.metadata.get("trial_kind") == "assessment" and self.step_index not in self.readiness_invalidated_steps:
                 self.readiness_trials.append(
                     {
                         "trial": step.trial,
