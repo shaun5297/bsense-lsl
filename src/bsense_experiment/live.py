@@ -176,6 +176,12 @@ def _safe_info_value(info: Any, method_name: str, default: Any) -> Any:
         return default
 
 
+def stream_has_source_id(info: Any) -> bool:
+    """Return whether liblsl can recover this stream after its outlet restarts."""
+
+    return bool(str(_safe_info_value(info, "source_id", "")).strip())
+
+
 def _fallback_channel_labels(kind: str, channel_count: int) -> tuple[str, ...]:
     known_labels = {
         "eeg": ("Fp1", "Fp2"),
@@ -264,7 +270,7 @@ def _default_inlet_factory(info: Any, buffer_seconds: float) -> Any:
     return StreamInlet(
         info,
         max_buflen=max(1, math.ceil(buffer_seconds)),
-        recover=True,
+        recover=stream_has_source_id(info),
         processing_flags=processing_flags,
     )
 

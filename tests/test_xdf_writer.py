@@ -105,6 +105,20 @@ class InvertingTimestampInlet(FakeInlet):
         return samples, timestamps
 
 
+class ResolvedStreamView:
+    """Represent the same LSL outlet discovered through another network path."""
+
+    def __init__(self, info: StreamInfo, uid: str) -> None:
+        self._info = info
+        self._uid = uid
+
+    def uid(self) -> str:
+        return self._uid
+
+    def __getattr__(self, name: str):
+        return getattr(self._info, name)
+
+
 class XDFWriterTests(unittest.TestCase):
     def test_varlen_integer_boundaries(self) -> None:
         self.assertEqual(encode_varlen_int(255), b"\x01\xff")
@@ -260,6 +274,46 @@ class XDFWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "重复.*EEG"):
             client._select_required_streams(required + (duplicate_eeg,))
+
+    def test_resolver_views_with_the_same_runtime_uid_are_recorded_once(self) -> None:
+        required = self._required_infos()
+        first_views = tuple(
+            ResolvedStreamView(info, f"runtime-{index}")
+            for index, info in enumerate(required)
+        )
+        second_views = tuple(
+            ResolvedStreamView(info, f"runtime-{index}")
+            for index, info in enumerate(required)
+        )
+        client = EmbeddedRecorderClient(
+            resolver=lambda _timeout: first_views + second_views,
+            inlet_factory=FakeInlet,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = client.start_recording(Path(directory), "network-duplicate.xdf")
+            time.sleep(0.03)
+            client.stop_recording(path)
+
+        inventory = next(record for record in client.diagnostics if record["event"] == "stream_inventory")
+        self.assertEqual(inventory["discovered_count"], 16)
+        self.assertEqual(inventory["unique_discovered_count"], 8)
+        self.assertEqual(inventory["resolver_duplicate_count"], 8)
+        self.assertEqual(inventory["selected_count"], 8)
+
+    def test_distinct_runtime_uids_are_still_rejected_as_duplicate_devices(self) -> None:
+        required = self._required_infos()
+        duplicate_eeg = ResolvedStreamView(required[0], "second-device-eeg")
+        first_eeg = ResolvedStreamView(required[0], "first-device-eeg")
+        client = EmbeddedRecorderClient()
+        unique, resolver_duplicates = client._deduplicate_resolved_streams(
+            (first_eeg, duplicate_eeg)
+        )
+
+        self.assertEqual(len(unique), 2)
+        self.assertEqual(resolver_duplicates, ())
+        with self.assertRaisesRegex(RuntimeError, "重复.*EEG"):
+            client._select_required_streams((first_eeg, duplicate_eeg, *required[1:]))
 
 
 if __name__ == "__main__":

@@ -12,7 +12,12 @@ from typing import Any
 
 from pylsl import StreamInlet, local_clock, resolve_streams
 
-from .live import STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, canonical_stream_kind
+from .live import (
+    STREAM_KIND_LABELS,
+    SUPPORTED_STREAM_KINDS,
+    canonical_stream_kind,
+    stream_has_source_id,
+)
 from .xdf_writer import XDFWriter
 
 
@@ -38,7 +43,7 @@ class _RecordedStream:
 
 
 def _default_inlet_factory(info: Any) -> StreamInlet:
-    return StreamInlet(info, max_buflen=360, recover=True)
+    return StreamInlet(info, max_buflen=360, recover=stream_has_source_id(info))
 
 
 class EmbeddedRecorderClient:
@@ -90,6 +95,37 @@ class EmbeddedRecorderClient:
     @staticmethod
     def _is_marker(info: Any) -> bool:
         return str(info.type()).strip().lower() in {"marker", "markers"}
+
+    @staticmethod
+    def _runtime_stream_key(info: Any) -> tuple[str, object]:
+        """Identify repeated resolver views without hiding distinct active outlets."""
+
+        try:
+            uid = str(info.uid()).strip()
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            uid = ""
+        if uid:
+            return "uid", uid
+        # Some test doubles and malformed outlets have no runtime UID. Repeated
+        # references to the exact same object are safe to collapse; separate
+        # objects remain ambiguous and are rejected by strict selection below.
+        return "object", id(info)
+
+    def _deduplicate_resolved_streams(
+        self,
+        infos: tuple[Any, ...],
+    ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+        unique: list[Any] = []
+        duplicates: list[Any] = []
+        seen: set[tuple[str, object]] = set()
+        for info in infos:
+            key = self._runtime_stream_key(info)
+            if key in seen:
+                duplicates.append(info)
+                continue
+            seen.add(key)
+            unique.append(info)
+        return tuple(unique), tuple(duplicates)
 
     def _select_required_streams(self, infos: tuple[Any, ...]) -> tuple[Any, ...]:
         """Select one deterministic BioMultiLite stream per kind and reject ambiguity."""
@@ -143,9 +179,10 @@ class EmbeddedRecorderClient:
         if target_path.exists():
             raise FileExistsError(f"目标 XDF 已存在：{target_path}。请更换 Run 编号。")
 
-        discovered_infos = tuple(self._resolver(self.discovery_timeout))
-        if not discovered_infos:
+        resolved_infos = tuple(self._resolver(self.discovery_timeout))
+        if not resolved_infos:
             raise RuntimeError("没有发现任何 LSL 流，无法开始内置 XDF 录制")
+        discovered_infos, resolver_duplicates = self._deduplicate_resolved_streams(resolved_infos)
         if self.required_stream_name is not None:
             required_markers = [info for info in discovered_infos if str(info.name()) == self.required_stream_name]
             if not required_markers:
@@ -155,7 +192,10 @@ class EmbeddedRecorderClient:
         infos = self._select_required_streams(discovered_infos) if self.require_biomultilite_streams else discovered_infos
         self._record_diagnostic(
             "stream_inventory",
-            discovered_count=len(discovered_infos),
+            discovered_count=len(resolved_infos),
+            unique_discovered_count=len(discovered_infos),
+            resolver_duplicate_count=len(resolver_duplicates),
+            resolver_duplicate_names=[str(info.name()) for info in resolver_duplicates],
             selected_count=len(infos),
             selected_names=[str(info.name()) for info in infos],
         )

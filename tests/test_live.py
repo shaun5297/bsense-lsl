@@ -34,6 +34,11 @@ class FakeInfo:
         raise RuntimeError("test metadata omitted")
 
 
+class NoSourceInfo(FakeInfo):
+    def source_id(self) -> str:
+        return ""
+
+
 class FakeInlet:
     def __init__(self) -> None:
         self.sent = False
@@ -132,13 +137,26 @@ class LiveStreamTests(unittest.TestCase):
     def test_default_inlet_uses_integer_buffer_length(self) -> None:
         from pylsl import proc_clocksync, proc_dejitter, proc_monotonize
 
-        info = object()
+        info = FakeInfo()
         with patch("pylsl.StreamInlet") as inlet_class:
             _default_inlet_factory(info, 60.0)
         inlet_class.assert_called_once_with(
             info,
             max_buflen=60,
             recover=True,
+            processing_flags=proc_clocksync | proc_dejitter | proc_monotonize,
+        )
+
+    def test_default_inlet_disables_unavailable_automatic_recovery(self) -> None:
+        from pylsl import proc_clocksync, proc_dejitter, proc_monotonize
+
+        info = NoSourceInfo()
+        with patch("pylsl.StreamInlet") as inlet_class:
+            _default_inlet_factory(info, 60.0)
+        inlet_class.assert_called_once_with(
+            info,
+            max_buflen=60,
+            recover=False,
             processing_flags=proc_clocksync | proc_dejitter | proc_monotonize,
         )
 
