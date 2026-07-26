@@ -6,6 +6,15 @@ import random
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .pvt import (
+    PVT_B_DURATION_SECONDS,
+    PVT_B_FALSE_START_SECONDS,
+    PVT_B_ISI_MAX_SECONDS,
+    PVT_B_ISI_MIN_SECONDS,
+    PVT_B_LAPSE_SECONDS,
+    PVT_B_TIMEOUT_SECONDS,
+)
+
 
 AdvanceMode = Literal["timed", "operator", "form"]
 
@@ -14,10 +23,11 @@ AdvanceMode = Literal["timed", "operator", "form"]
 class InputField:
     key: str
     label: str
-    kind: Literal["rating", "choice", "boolean"]
-    minimum: int | None = None
-    maximum: int | None = None
+    kind: Literal["rating", "choice", "boolean", "number", "text"]
+    minimum: float | None = None
+    maximum: float | None = None
     choices: tuple[str, ...] = ()
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -1057,30 +1067,45 @@ def _sart_steps(
     return steps
 
 
-def build_m6_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]:
+def build_m6_plan(
+    short: bool = False,
+    seed: int = 0,
+    readiness_reference: bool = True,
+    **_: object,
+) -> list[Step]:
     """Build the competition prototype for a pre-shift readiness screen."""
 
     rng = random.Random(seed)
     assessment_trial_count = 18 if short else 180
-    context_fields = (
-        InputField("kss_score", "当前困倦程度 KSS（1=非常清醒，9=极度困倦）", "rating", 1, 9),
-        InputField(
-            "sleep_duration_band",
-            "过去 24 小时累计睡眠",
-            "choice",
-            choices=("少于5小时", "5–6小时", "6–7小时", "7–8小时", "8小时及以上"),
-        ),
+    background_fields = (
+        InputField("sleep_duration_hours", "过去 24 小时累计睡眠（小时，可填小数）", "number", 0, 24),
+        InputField("last_sleep_onset_time", "最近一次入睡时间（HH:MM）", "text"),
+        InputField("last_wake_time", "最近一次起床时间（HH:MM）", "text"),
+        InputField("continuous_awake_hours", "截至采集时连续清醒时长（小时）", "number", 0, 72),
+        InputField("caffeine_mg_last_8h", "过去 8 小时咖啡因摄入量（mg；无则填 0）", "number", 0, 2000),
+        InputField("last_caffeine_time", "最近咖啡因摄入时间（HH:MM；无则留空）", "text", required=False),
         InputField(
             "shift_type",
             "本次班次",
             "choice",
             choices=("日班", "夜班", "倒班/跨时段", "不适用"),
         ),
+    )
+    precheck_fields = (
+        InputField("kss_score", "采集前 KSS（1=非常清醒，9=极度困倦）", "rating", 1, 9),
         InputField(
-            "assessment_attempt",
-            "本次属于",
-            "choice",
-            choices=("首次", "复测"),
+            "parent_run_id",
+            "关联首次检测 Run（首次检测留空）",
+            "text",
+            required=False,
+        ),
+        InputField(
+            "rest_duration_minutes",
+            "复测前实际休息分钟数（首次检测留空）",
+            "number",
+            0,
+            180,
+            required=False,
         ),
         InputField("ready_to_test", "本人无急性不适并自愿继续本次筛查", "boolean"),
     )
@@ -1093,15 +1118,28 @@ def build_m6_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
             709,
         ),
         Step(
-            "状态确认",
-            "身份沿用匿名被试编号；请按当前真实状态填写。",
+            "睡眠与班次",
+            "请按当前真实情况填写。时间使用 24 小时制，未知信息应由实验员核实后再继续。",
             0.0,
-            "readiness_context_start",
+            "readiness_background_start",
             710,
             advance="form",
-            completion_event="readiness_context",
+            completion_event="readiness_background",
             completion_code=711,
-            fields=context_fields,
+            fields=background_fields,
+            metadata={"merge_form_into_context": True},
+        ),
+        Step(
+            "采集前状态",
+            "首次检测不填关联 Run；复测必须填写首次检测 Run 和实际休息时长。",
+            0.0,
+            "readiness_context_start",
+            716,
+            advance="form",
+            completion_event="readiness_context",
+            completion_code=717,
+            fields=precheck_fields,
+            metadata={"merge_form_into_context": True, "normalize_readiness_context": True},
         ),
         Step(
             "+",
@@ -1156,15 +1194,81 @@ def build_m6_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
             724,
             metadata={"expected_trials": assessment_trial_count},
         ),
+    ]
+    if readiness_reference:
+        pvt_duration = 6.0 if short else PVT_B_DURATION_SECONDS
+        body.extend(
+            [
+                Step(
+                    "采后状态",
+                    "请报告此刻的真实困倦程度。",
+                    0.0,
+                    "readiness_postcheck_start",
+                    732,
+                    advance="form",
+                    completion_event="readiness_postcheck",
+                    completion_code=733,
+                    fields=(
+                        InputField(
+                            "kss_post_score",
+                            "采集后 KSS（1=非常清醒，9=极度困倦）",
+                            "rating",
+                            1,
+                            9,
+                        ),
+                    ),
+                    metadata={"merge_form_into_context": True},
+                ),
+                Step(
+                    "PVT 说明",
+                    "看到黄色计时数字后尽快按空格；等待期间不要抢按。任务持续 3 分钟。",
+                    1.0 if short else 5.0,
+                    "pvt_instruction",
+                    735,
+                ),
+                Step(
+                    "+",
+                    "等待黄色计时数字，出现后立即按空格。",
+                    pvt_duration,
+                    "pvt_start",
+                    740,
+                    "pvt_reference",
+                    response_key="space",
+                    completion_event="pvt_end",
+                    completion_code=744,
+                    metadata={
+                        "task_kind": "pvt",
+                        "reference_only": True,
+                        "not_used_by_rules": True,
+                        "duration_s": pvt_duration,
+                        "isi_min_s": PVT_B_ISI_MIN_SECONDS,
+                        "isi_max_s": PVT_B_ISI_MAX_SECONDS,
+                        "false_start_threshold_s": PVT_B_FALSE_START_SECONDS,
+                        "lapse_threshold_s": PVT_B_LAPSE_SECONDS,
+                        "response_timeout_s": PVT_B_TIMEOUT_SECONDS,
+                        "stimulus_event": "pvt_stimulus",
+                        "stimulus_code": 741,
+                        "response_event": "pvt_response",
+                        "response_code": 742,
+                        "result_event": "pvt_trial_result",
+                        "result_code": 743,
+                    },
+                ),
+            ]
+        )
+    body.append(
         Step(
             "正在生成结果",
-            "结果仅供当班状态筛查与复测辅助。",
+            "PVT 只作为独立研究参照，不进入当前四态规则。",
             0.5 if short else 4.0,
             "readiness_assessment",
             730,
-            metadata={"expected_trials": assessment_trial_count},
-        ),
-    ]
+            metadata={
+                "expected_trials": assessment_trial_count,
+                "readiness_reference_enabled": readiness_reference,
+            },
+        )
+    )
     return _experiment_bounds("m6_readiness", body)
 
 
@@ -1176,6 +1280,7 @@ def build_protocol_plan(
     seed: int = 0,
     target_object: str = "水杯",
     nback_order: str = "ascending",
+    readiness_reference: bool = True,
 ) -> list[Step]:
     builders = {
         "deviceqc": build_deviceqc_plan,
@@ -1199,6 +1304,7 @@ def build_protocol_plan(
         seed=seed,
         target_object=target_object,
         nback_order=nback_order,
+        readiness_reference=readiness_reference,
     )
 
 
@@ -1207,8 +1313,15 @@ def estimate_protocol_seconds(
     *,
     short: bool = False,
     older_adult: bool = False,
+    readiness_reference: bool = True,
 ) -> float:
     return sum(
         step.duration
-        for step in build_protocol_plan(task, short=short, older_adult=older_adult, seed=0)
+        for step in build_protocol_plan(
+            task,
+            short=short,
+            older_adult=older_adult,
+            seed=0,
+            readiness_reference=readiness_reference,
+        )
     )

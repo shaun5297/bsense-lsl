@@ -39,7 +39,7 @@ M0 是正式任务的建议前置，但程序不强制依赖。同一天、同�
 | M3B | 11.1 分钟 | 分段持续 1-back，共 5 个两分钟段，每段后评分，末尾恢复 30 秒 |
 | M4A | 8.8 分钟 | 外部提示后的有意图/无意图各 40 Trial，顺序随机 |
 | M4B | 8.8 分钟 | 60 轮三物体串行高亮，目标注意而非运动想象 |
-| M6 | 4.7 分钟 | 状态确认 → 30 秒 EEG 质量门控 → 45 秒睁眼基线 → 3 分钟 SART → 四态结果 |
+| M6 | 研究标签模式约 7.8 分钟；关闭后约 4.7 分钟 | 背景/采前 KSS → 质量门控与基线 → 3 分钟 SART → 采后 KSS → 独立 3 分钟 PVT → 四态结果 |
 | M5 | 约 5 分钟人工时间 | 结束问卷；自动计时只包含模块边界 |
 
 M0–M5 自动计时合计约 94.7 分钟；加 10 分钟中场休息、M5 及各模块人工评分后，现场应预留约 2 小时。M1 的方案标称 40 分钟包含设备调整和组间休息等现场时间；程序内自动时序约 25.5 分钟。每个 Run 三类严格平衡，且不会出现同一条件连续 3 次。启用老年被试节奏后，执行想象延长至 5 秒、试次休息延长至 4 秒、组间休息延长至 5 分钟，自动计时约 36.5 分钟。
@@ -124,12 +124,16 @@ M3B 同时记录标准 1–9 KSS 困倦评分和 1–5 精神疲劳评分，避�
 
 ### M6 脑状态安检
 
-M6 是赛道7的独立快速筛查流程，不要求工作中持续佩戴，也不依赖 M0。首页选择“赛道7｜脑状态安检”预设后，程序依次完成：
+M6 是赛道7的独立筛查流程，不要求工作中持续佩戴，也不依赖 M0。首页选择“赛道7｜脑状态安检”预设后，默认开启研究标签模式，程序依次完成：
 
-1. 记录 KSS、过去 24 小时睡眠时长档、班次类型、首次/复测状态和继续意愿；
-2. 30 秒 EEG 在线质量门控，并采集 45 秒睁眼当次基线；
-3. 4 个练习试次后完成 180 个、每个 1 秒的 SART/Go-NoGo 正式试次：数字显示 0.5 秒、随后 0.5 秒中央注视，除数字 3 外均按空格，数字 3 占 20 次且不连续出现；
-4. 输出“正常、建议复测、建议休息、无法评估”之一。
+1. 记录过去 24 小时精确睡眠时长、最近入睡/起床时间、连续清醒时长、班次、过去 8 小时咖啡因剂量/最近摄入时间和采前 KSS；
+2. 首次检测不填 `parent_run_id`；复测必须填写关联首次检测 Run 和实际休息分钟数，程序据此推导 `assessment_attempt`，并由精确睡眠时长派生兼容规则引擎的 `sleep_duration_band`；
+3. 30 秒 EEG 在线质量门控，并采集 45 秒睁眼当次基线；
+4. 4 个练习试次后完成 180 个、每个 1 秒的 SART/Go-NoGo 正式试次：数字显示 0.5 秒、随后 0.5 秒中央注视，除数字 3 外均按空格，数字 3 占 20 次且不连续出现；
+5. 记录采后 KSS，并执行固定 3 分钟 PVT：前一响应后随机等待 1–4 秒出现黄色毫秒计时数字，等待期抢按或刺激后小于 100 ms 的响应记为 `false_start`，不小于 355 ms 记为 PVT-B `lapse`，30 秒无响应记为 `timeout`；
+6. 输出“正常、建议复测、建议休息、无法评估”之一。PVT 和采后 KSS 作为独立研究参照保存在 `external_reference`，不进入当前四态规则。
+
+正式先导采集应保持“研究标签模式”开启；只需复现原 3–5 分钟比赛演示时可在首页关闭，Marker 会通过 `readiness_reference_enabled` 和 `readiness_protocol_version` 明确区分两种协议。
 
 响应小于 100 ms 单独标为 `false_start`，不再混入正常反应时；Go 无响应为 `omission`，No-Go 错按为 `commission`（含 No-Go 上的抢按：其 `outcome` 归为 `commission`，同时保留 `false_start` 标志并计入抢按率），No-Go 正确抑制为 `correct_rejection`。练习试次和操作员标记 `trial_invalid` 的正式试次不进入计分。首次检测出现任何风险阈值只输出“建议复测”，不会直接升级为“建议休息”；只有复测且高风险信号仍存在时才可输出“建议休息”。EEG 质量不合格、质量采样缺失或正式试次不足 90% 时输出“无法评估”，不能把缺失数据误判为正常。M6 的 SART 节奏固定为每试次 1 秒，不随“老年被试节奏”设置变化。
 
@@ -213,4 +217,5 @@ sub-pilot01_ses-01_task-m2_nback_run-001.xdf
 - P300 BCI 的主要能量通常在 Cz、Pz、PO7、PO8 等中央-顶枕位置采集：[A novel P300-based brain-computer interface stimulus presentation paradigm](https://pmc.ncbi.nlm.nih.gov/articles/PMC2879474/)；
 - 额部 8 通道 fNIRS 对 N-back 负荷具有已有实证基础，但公开研究的准确率不能直接外推到本设备、被试或数据划分：[Mental workload during n-back task—quantified in the prefrontal cortex using fNIRS](https://pmc.ncbi.nlm.nih.gov/articles/PMC3893598/)；
 - KSS 是 1–9 级瞬时困倦量表，并已与 EEG/行为指标做过验证：[Validation of the Karolinska sleepiness scale against performance and EEG variables](https://pubmed.ncbi.nlm.nih.gov/16679057/)；
+- 3 分钟 PVT-B 的原验证采用 1–4 秒随机响应—刺激间隔和 355 ms lapse 口径；本项目保留这些参数，但不把手持设备结果直接外推到电脑键盘环境：[Validity and Sensitivity of a Brief Psychomotor Vigilance Test](https://pmc.ncbi.nlm.nih.gov/articles/PMC3197786/)；
 - 额部 fNIRS 对呼吸、血压、头皮血流及任务诱发的系统生理变化敏感：[The physiological origin of task-evoked systemic artefacts in functional near infrared spectroscopy](https://pmc.ncbi.nlm.nih.gov/articles/PMC3348501/)。

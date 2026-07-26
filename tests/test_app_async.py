@@ -1,3 +1,4 @@
+import random
 import threading
 import time
 import unittest
@@ -396,6 +397,102 @@ class AppAsyncTests(unittest.TestCase):
 
         self.assertEqual(markers[0][0], "nback_response")
         self.assertNotIn("false_start", markers[0][1])
+
+    def test_pvt_response_records_independent_lapse_and_reschedules(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.root = FakeRoot()
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.step_generation = 1
+        app.step_completion_started = False
+        app.current_context = {}
+        app.default_cue_foreground = "#fff"
+        app.cue_label = FakeLabel()
+        app.pvt_trials = []
+        app.pvt_invalidated_trials = set()
+        app.pvt_trial_index = 1
+        app.pvt_stimulus_onset = time.monotonic() - 0.4
+        app.pvt_current_isi_s = 2.0
+        app.pvt_stimulus_id = None
+        app.pvt_counter_id = None
+        app.pvt_feedback_id = None
+        app.pvt_timeout_id = None
+        app.pvt_rng = random.Random(42)
+        step = Step(
+            "+",
+            "",
+            180.0,
+            "pvt_start",
+            740,
+            response_key="space",
+            metadata={
+                "task_kind": "pvt",
+                "isi_min_s": 1.0,
+                "isi_max_s": 4.0,
+                "false_start_threshold_s": 0.1,
+                "lapse_threshold_s": 0.355,
+                "response_event": "pvt_response",
+                "response_code": 742,
+                "result_event": "pvt_trial_result",
+                "result_code": 743,
+            },
+        )
+        app.plan = [step]
+        markers: list[tuple[str, dict[str, object]]] = []
+        app._push_step_marker = (
+            lambda event, _code, _step, **values: markers.append((event, values))
+        )
+
+        result = app._on_response_key(None)
+
+        self.assertEqual(result, "break")
+        self.assertEqual([event for event, _values in markers], ["pvt_response", "pvt_trial_result"])
+        self.assertEqual(app.pvt_trials[0]["outcome"], "lapse")
+        self.assertIsNone(app.pvt_stimulus_onset)
+        self.assertIsNotNone(app.pvt_stimulus_id)
+
+    def test_pvt_finalization_excludes_truncated_stimulus_and_keeps_quality(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.root = FakeRoot()
+        app.current_context = {}
+        app.pvt_trials = []
+        app.pvt_invalidated_trials = set()
+        app.pvt_trial_index = 1
+        app.pvt_stimulus_onset = time.monotonic()
+        app.pvt_current_isi_s = 2.0
+        app.pvt_stimulus_id = None
+        app.pvt_counter_id = "counter"
+        app.pvt_feedback_id = None
+        app.pvt_timeout_id = "timeout"
+        app.pvt_quality_samples = 100
+        app.pvt_quality_bad_samples = 5
+        app.pvt_quality_issues = {"eeg_flat"}
+        step = Step(
+            "+",
+            "",
+            180.0,
+            "pvt_start",
+            740,
+            metadata={
+                "task_kind": "pvt",
+                "duration_s": 180.0,
+                "result_event": "pvt_trial_result",
+                "result_code": 743,
+            },
+        )
+        markers: list[tuple[str, dict[str, object]]] = []
+        app._push_step_marker = (
+            lambda event, _code, _step, **values: markers.append((event, values))
+        )
+
+        summary = app._finalize_pvt_block(step)
+
+        self.assertEqual(markers[0][1]["outcome"], "truncated")
+        self.assertEqual(summary["trial_count"], 0)
+        self.assertEqual(summary["signal_quality_bad_rate"], 0.05)
+        self.assertTrue(summary["not_used_by_rules"])
+        self.assertEqual(set(app.root.cancelled), {"counter", "timeout"})
 
     def _sart_step(self, trial_kind: str, trial: int = 1) -> Step:
         return Step(

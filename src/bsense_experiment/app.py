@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import re
 import socket
 import sys
@@ -46,7 +47,12 @@ from .protocols import (
     build_protocol_plan,
     estimate_protocol_seconds,
 )
-from .readiness import assess_readiness, classify_sart_trial
+from .pvt import classify_pvt_response, summarize_pvt_trials
+from .readiness import (
+    assess_readiness,
+    classify_sart_trial,
+    normalize_readiness_context,
+)
 from .resources import object_asset_path
 
 if TYPE_CHECKING:
@@ -80,7 +86,7 @@ ACQUISITION_BATCH_PRESETS: dict[str, tuple[str, tuple[str, ...], str]] = {
     QUICK_READINESS_LABEL: (
         "readiness_screen",
         ("m6_readiness",),
-        "M6 上岗前快速筛查；自动计时约 4.7 分钟，另加状态确认。",
+        "M6 脑状态筛查；研究标签模式约 7.8 分钟，关闭后约 4.7 分钟。",
     ),
     TWO_BATCH_A_LABEL: (
         "two_part_a",
@@ -330,6 +336,7 @@ class BSenseExperimentApp:
         self.recording_mode = StringVar(value=RECORDING_MODE_EMBEDDED)
         self.audio_enabled = BooleanVar(value=True)
         self.nback_feedback = BooleanVar(value=False)
+        self.readiness_reference = BooleanVar(value=True)
         self.target_object = StringVar(value="水杯")
         self.nback_order = StringVar(value="由易到难（原方案）")
         self.acquisition_batch = StringVar(value=CUSTOM_ACQUISITION_BATCH)
@@ -394,6 +401,20 @@ class BSenseExperimentApp:
         self.readiness_quality_samples = 0
         self.readiness_quality_bad_samples = 0
         self.readiness_quality_issues: set[str] = set()
+        self.pvt_trials: list[dict[str, object]] = []
+        self.pvt_invalidated_trials: set[int] = set()
+        self.pvt_summary: dict[str, object] | None = None
+        self.pvt_quality_samples = 0
+        self.pvt_quality_bad_samples = 0
+        self.pvt_quality_issues: set[str] = set()
+        self.pvt_trial_index = 0
+        self.pvt_stimulus_onset: float | None = None
+        self.pvt_current_isi_s: float | None = None
+        self.pvt_stimulus_id: str | None = None
+        self.pvt_counter_id: str | None = None
+        self.pvt_feedback_id: str | None = None
+        self.pvt_timeout_id: str | None = None
+        self.pvt_rng = random.Random(0)
         self.form_variables: dict[str, StringVar] = {}
         self.form_error = StringVar(value="")
         self.object_images: dict[str, PhotoImage] = {}
@@ -618,6 +639,12 @@ class BSenseExperimentApp:
             sticky="w",
             pady=6,
         )
+        ttk.Checkbutton(
+            module_tab,
+            text="M6 研究标签模式：追加采后 KSS 与 3 分钟 PVT（正式采集保持开启）",
+            variable=self.readiness_reference,
+            command=self._practice_config_changed,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=6)
         module_tab.columnconfigure(0, weight=1)
         module_tab.columnconfigure(1, weight=1)
         module_tab.columnconfigure(2, weight=1)
@@ -791,6 +818,7 @@ class BSenseExperimentApp:
                 task,
                 short=self.short_protocol.get(),
                 older_adult=self.older_adult.get(),
+                readiness_reference=self.readiness_reference.get(),
             )
             for task in selected
         )
@@ -801,6 +829,7 @@ class BSenseExperimentApp:
                 short=self.short_protocol.get(),
                 older_adult=self.older_adult.get(),
                 target_object=self.target_object.get(),
+                readiness_reference=self.readiness_reference.get(),
             )
             if any(step.advance in {"operator", "form"} for step in plan):
                 manual_note = "（另含人工确认/问卷时间）"
@@ -1118,16 +1147,28 @@ class BSenseExperimentApp:
             and not self.stopping
             and self.current_task == "m6_readiness"
             and 0 <= self.step_index < len(self.plan)
-            and self.plan[self.step_index].event
-            in {"readiness_signal_gate_start", "readiness_baseline_start", "sart_stimulus"}
         ):
-            self.readiness_quality_samples += 1
+            event = self.plan[self.step_index].event
             eeg_status = status_by_kind.get("eeg", "waiting")
-            if eeg_status != "ready" or manager_errors:
-                self.readiness_quality_bad_samples += 1
-                self.readiness_quality_issues.add(f"eeg_{eeg_status}")
-                if manager_errors:
-                    self.readiness_quality_issues.add("stream_manager_error")
+            bad_quality = eeg_status != "ready" or bool(manager_errors)
+            if event in {
+                "readiness_signal_gate_start",
+                "readiness_baseline_start",
+                "sart_stimulus",
+            }:
+                self.readiness_quality_samples += 1
+                if bad_quality:
+                    self.readiness_quality_bad_samples += 1
+                    self.readiness_quality_issues.add(f"eeg_{eeg_status}")
+                    if manager_errors:
+                        self.readiness_quality_issues.add("stream_manager_error")
+            elif event == "pvt_start":
+                self.pvt_quality_samples += 1
+                if bad_quality:
+                    self.pvt_quality_bad_samples += 1
+                    self.pvt_quality_issues.add(f"eeg_{eeg_status}")
+                    if manager_errors:
+                        self.pvt_quality_issues.add("stream_manager_error")
         if self.root.winfo_exists():
             self.task_signal_poll_id = self.root.after(500, self._update_task_signal_status)
 
@@ -1181,9 +1222,18 @@ class BSenseExperimentApp:
             variable = StringVar(value="")
             self.form_variables[field.key] = variable
             if field.kind == "rating":
-                values = tuple(str(value) for value in range(field.minimum or 1, (field.maximum or 10) + 1))
+                minimum = int(field.minimum or 1)
+                maximum = int(field.maximum or 10)
+                values = tuple(str(value) for value in range(minimum, maximum + 1))
             elif field.kind == "boolean":
                 values = ("否", "是")
+            elif field.kind in {"number", "text"}:
+                ttk.Entry(
+                    self.form_frame,
+                    textvariable=variable,
+                    font=(UI_FONT_FAMILY, 15),
+                ).grid(row=row, column=1, sticky="ew", pady=7)
+                continue
             else:
                 values = field.choices
             ttk.Combobox(
@@ -1206,14 +1256,33 @@ class BSenseExperimentApp:
     def _read_inline_form(self, fields: tuple[InputField, ...]) -> dict[str, object] | None:
         responses: dict[str, object] = {}
         for field in fields:
-            value = self.form_variables[field.key].get()
+            value = self.form_variables[field.key].get().strip()
             if not value:
+                if not field.required:
+                    responses[field.key] = None
+                    continue
                 self.form_error.set(f"请填写：{field.label}")
                 return None
             if field.kind == "rating":
                 responses[field.key] = int(value)
             elif field.kind == "boolean":
                 responses[field.key] = value == "是"
+            elif field.kind == "number":
+                try:
+                    number = float(value)
+                except ValueError:
+                    self.form_error.set(f"请输入有效数字：{field.label}")
+                    return None
+                if not math.isfinite(number):
+                    self.form_error.set(f"请输入有限数字：{field.label}")
+                    return None
+                if field.minimum is not None and number < field.minimum:
+                    self.form_error.set(f"{field.label}不能小于 {field.minimum:g}")
+                    return None
+                if field.maximum is not None and number > field.maximum:
+                    self.form_error.set(f"{field.label}不能大于 {field.maximum:g}")
+                    return None
+                responses[field.key] = number
             else:
                 responses[field.key] = value
         self.form_error.set("")
@@ -1256,11 +1325,18 @@ class BSenseExperimentApp:
         if not self.active or self.stopping:
             return
         step = self.plan[self.step_index] if 0 <= self.step_index < len(self.plan) else None
+        pvt_trial = (
+            self.pvt_trial_index
+            if step is not None
+            and step.metadata.get("task_kind") == "pvt"
+            and self.pvt_stimulus_onset is not None
+            else None
+        )
         payload = {
             "code": code,
             "event": event,
             "block": step.block if step is not None else None,
-            "trial": step.trial if step is not None else None,
+            "trial": pvt_trial if pvt_trial is not None else (step.trial if step is not None else None),
             **self.current_context,
             "app_version": APP_VERSION,
             "unix_time": time.time(),
@@ -1272,6 +1348,8 @@ class BSenseExperimentApp:
             and step.metadata.get("trial_kind") == "assessment"
         ):
             self.readiness_invalidated_steps.add(self.step_index)
+        if event == "trial_invalid" and pvt_trial is not None:
+            self.pvt_invalidated_trials.add(pvt_trial)
         self.progress_label.configure(text=f"已记录：{event}  |  步骤 {self.step_index + 1}/{len(self.plan)}")
         self.task_frame.focus_set()
 
@@ -1435,6 +1513,11 @@ class BSenseExperimentApp:
             "short_protocol": self.short_protocol.get(),
             "older_adult_timing": self.older_adult.get(),
         }
+        if task == "m6_readiness":
+            self.current_context["readiness_reference_enabled"] = self.readiness_reference.get()
+            self.current_context["readiness_protocol_version"] = (
+                "m6_reference_v1" if self.readiness_reference.get() else "m6_rules_v1"
+            )
         nback_order = "counterbalanced" if self.nback_order.get().startswith("拉丁方") else "ascending"
         if task == "m2_nback":
             self.current_context["nback_order"] = nback_order
@@ -1446,6 +1529,7 @@ class BSenseExperimentApp:
             seed=seed,
             target_object=self.target_object.get(),
             nback_order=nback_order,
+            readiness_reference=self.readiness_reference.get(),
         )
         self.step_index = -1
         self.active = True
@@ -1458,6 +1542,20 @@ class BSenseExperimentApp:
         self.readiness_quality_samples = 0
         self.readiness_quality_bad_samples = 0
         self.readiness_quality_issues = set()
+        self.pvt_trials = []
+        self.pvt_invalidated_trials = set()
+        self.pvt_summary = None
+        self.pvt_quality_samples = 0
+        self.pvt_quality_bad_samples = 0
+        self.pvt_quality_issues = set()
+        self.pvt_trial_index = 0
+        self.pvt_stimulus_onset = None
+        self.pvt_current_isi_s = None
+        self.pvt_stimulus_id = None
+        self.pvt_counter_id = None
+        self.pvt_feedback_id = None
+        self.pvt_timeout_id = None
+        self.pvt_rng = random.Random(seed ^ 0x505654)
         self.pending_next_task = None
         self.recorder_started = False
         self.xdf_initial_size = 0
@@ -1616,6 +1714,12 @@ class BSenseExperimentApp:
         result["signal_quality_sample_count"] = self.readiness_quality_samples
         result["signal_quality_bad_sample_count"] = self.readiness_quality_bad_samples
         result["signal_quality_bad_rate"] = round(quality_bad_rate, 6)
+        result["external_reference"] = {
+            "not_used_by_rules": True,
+            "kss_pre_score": self.current_context.get("kss_score"),
+            "kss_post_score": self.current_context.get("kss_post_score"),
+            "pvt": getattr(self, "pvt_summary", None),
+        }
         return result
 
     @staticmethod
@@ -1625,6 +1729,245 @@ class BSenseExperimentApp:
             f"{result.get('disclaimer', '')}\n"
             "管理端只应接收本次状态等级；原始脑信号和明细指标不得用于惩罚或永久能力画像。"
         )
+
+    def _pvt_step_is_active(
+        self,
+        generation: int,
+        step_index: int,
+    ) -> bool:
+        return (
+            self.active
+            and not self.stopping
+            and generation == self.step_generation
+            and step_index == self.step_index
+            and 0 <= step_index < len(self.plan)
+            and self.plan[step_index].metadata.get("task_kind") == "pvt"
+            and not self.step_completion_started
+        )
+
+    def _cancel_named_callback(self, attribute: str) -> None:
+        callback_id = getattr(self, attribute, None)
+        if callback_id is None:
+            return
+        try:
+            self.root.after_cancel(callback_id)
+        except Exception:  # noqa: BLE001 - callback may already be executing
+            pass
+        setattr(self, attribute, None)
+
+    def _cancel_pvt_callbacks(self) -> None:
+        for attribute in (
+            "pvt_stimulus_id",
+            "pvt_counter_id",
+            "pvt_feedback_id",
+            "pvt_timeout_id",
+        ):
+            self._cancel_named_callback(attribute)
+
+    def _start_pvt_block(self, step: Step) -> None:
+        self._cancel_pvt_callbacks()
+        self.pvt_trials = []
+        self.pvt_summary = None
+        self.pvt_trial_index = 0
+        self.pvt_stimulus_onset = None
+        self.pvt_current_isi_s = None
+        self.pvt_invalidated_trials = set()
+        self.pvt_quality_samples = 0
+        self.pvt_quality_bad_samples = 0
+        self.pvt_quality_issues = set()
+        self._schedule_next_pvt_stimulus(step)
+
+    def _schedule_next_pvt_stimulus(
+        self,
+        step: Step,
+        *,
+        feedback_text: str | None = None,
+    ) -> None:
+        self._cancel_pvt_callbacks()
+        self.pvt_stimulus_onset = None
+        minimum = float(step.metadata.get("isi_min_s", 1.0))
+        maximum = float(step.metadata.get("isi_max_s", 4.0))
+        self.pvt_current_isi_s = self.pvt_rng.uniform(minimum, maximum)
+        generation = self.step_generation
+        step_index = self.step_index
+        if feedback_text is None:
+            self.cue_label.configure(
+                text="+",
+                font=(UI_FONT_FAMILY, self._cue_font_size("+", False), "bold"),
+                foreground=self.default_cue_foreground,
+            )
+        else:
+            self.cue_label.configure(
+                text=feedback_text,
+                font=(UI_FONT_FAMILY, 64, "bold"),
+                foreground=TASK_ACCENT,
+            )
+            feedback_ms = min(1000, max(1, int(self.pvt_current_isi_s * 1000)))
+            self.pvt_feedback_id = self.root.after(
+                feedback_ms,
+                lambda: self._show_pvt_waiting(generation, step_index),
+            )
+        self.pvt_stimulus_id = self.root.after(
+            max(1, int(self.pvt_current_isi_s * 1000)),
+            lambda: self._present_pvt_stimulus(generation, step_index),
+        )
+
+    def _show_pvt_waiting(self, generation: int, step_index: int) -> None:
+        self.pvt_feedback_id = None
+        if not self._pvt_step_is_active(generation, step_index):
+            return
+        self.cue_label.configure(
+            text="+",
+            font=(UI_FONT_FAMILY, self._cue_font_size("+", False), "bold"),
+            foreground=self.default_cue_foreground,
+        )
+
+    def _present_pvt_stimulus(self, generation: int, step_index: int) -> None:
+        self.pvt_stimulus_id = None
+        if not self._pvt_step_is_active(generation, step_index):
+            return
+        step = self.plan[step_index]
+        self.pvt_trial_index += 1
+        self.pvt_stimulus_onset = time.monotonic()
+        self.cue_label.configure(
+            text="000",
+            font=(UI_FONT_FAMILY, 84, "bold"),
+            foreground="#ffd33d",
+        )
+        self._push_step_marker(
+            str(step.metadata["stimulus_event"]),
+            int(step.metadata["stimulus_code"]),
+            step,
+            trial=self.pvt_trial_index,
+            interstimulus_interval_s=round(float(self.pvt_current_isi_s or 0.0), 6),
+        )
+        self.pvt_counter_id = self.root.after(
+            50,
+            lambda: self._update_pvt_counter(generation, step_index),
+        )
+        self.pvt_timeout_id = self.root.after(
+            max(1, int(float(step.metadata.get("response_timeout_s", 30.0)) * 1000)),
+            lambda: self._pvt_response_timeout(generation, step_index),
+        )
+
+    def _update_pvt_counter(self, generation: int, step_index: int) -> None:
+        self.pvt_counter_id = None
+        if not self._pvt_step_is_active(generation, step_index) or self.pvt_stimulus_onset is None:
+            return
+        elapsed_ms = max(0, round((time.monotonic() - self.pvt_stimulus_onset) * 1000))
+        self.cue_label.configure(text=f"{elapsed_ms:03d}")
+        self.pvt_counter_id = self.root.after(
+            50,
+            lambda: self._update_pvt_counter(generation, step_index),
+        )
+
+    def _record_pvt_result(
+        self,
+        step: Step,
+        result: dict[str, object],
+        *,
+        stimulus_present: bool,
+    ) -> dict[str, object]:
+        trial = self.pvt_trial_index if stimulus_present else None
+        row = {
+            "trial": trial,
+            "stimulus_present": stimulus_present,
+            "interstimulus_interval_s": (
+                round(float(self.pvt_current_isi_s), 6)
+                if self.pvt_current_isi_s is not None
+                else None
+            ),
+            "invalidated": bool(
+                trial is not None and trial in self.pvt_invalidated_trials
+            ),
+            **result,
+        }
+        self.pvt_trials.append(row)
+        self._push_step_marker(
+            str(step.metadata["result_event"]),
+            int(step.metadata["result_code"]),
+            step,
+            **row,
+        )
+        return row
+
+    def _handle_pvt_response(self, step: Step) -> str:
+        stimulus_present = self.pvt_stimulus_onset is not None
+        reaction_time = (
+            time.monotonic() - self.pvt_stimulus_onset
+            if self.pvt_stimulus_onset is not None
+            else None
+        )
+        result = classify_pvt_response(
+            reaction_time,
+            stimulus_present=stimulus_present,
+            false_start_threshold_s=float(step.metadata.get("false_start_threshold_s", 0.1)),
+            lapse_threshold_s=float(step.metadata.get("lapse_threshold_s", 0.355)),
+        )
+        self._push_step_marker(
+            str(step.metadata["response_event"]),
+            int(step.metadata["response_code"]),
+            step,
+            trial=self.pvt_trial_index if stimulus_present else None,
+            stimulus_present=stimulus_present,
+            reaction_time_s=result["reaction_time_s"],
+            outcome=result["outcome"],
+        )
+        self._record_pvt_result(step, result, stimulus_present=stimulus_present)
+        feedback = (
+            "过早"
+            if result["outcome"] == "false_start"
+            else f"{float(result['reaction_time_s']) * 1000:.0f} ms"
+        )
+        self._schedule_next_pvt_stimulus(step, feedback_text=feedback)
+        return "break"
+
+    def _pvt_response_timeout(self, generation: int, step_index: int) -> None:
+        self.pvt_timeout_id = None
+        if (
+            not self._pvt_step_is_active(generation, step_index)
+            or self.pvt_stimulus_onset is None
+        ):
+            return
+        step = self.plan[step_index]
+        result = classify_pvt_response(
+            float(step.metadata.get("response_timeout_s", 30.0)),
+            stimulus_present=True,
+            lapse_threshold_s=float(step.metadata.get("lapse_threshold_s", 0.355)),
+            timed_out=True,
+        )
+        self._record_pvt_result(step, result, stimulus_present=True)
+        self._schedule_next_pvt_stimulus(step, feedback_text="超时")
+
+    def _finalize_pvt_block(self, step: Step) -> dict[str, object]:
+        if self.pvt_stimulus_onset is not None:
+            self._record_pvt_result(
+                step,
+                {
+                    "responded": False,
+                    "outcome": "truncated",
+                    "false_start": False,
+                    "lapse": False,
+                    "reaction_time_s": None,
+                },
+                stimulus_present=True,
+            )
+        self._cancel_pvt_callbacks()
+        self.pvt_stimulus_onset = None
+        self.pvt_summary = summarize_pvt_trials(self.pvt_trials)
+        self.pvt_summary["duration_s"] = float(step.metadata.get("duration_s", step.duration))
+        quality_bad_rate = (
+            self.pvt_quality_bad_samples / self.pvt_quality_samples
+            if self.pvt_quality_samples
+            else 1.0
+        )
+        self.pvt_summary["signal_quality_sample_count"] = self.pvt_quality_samples
+        self.pvt_summary["signal_quality_bad_sample_count"] = self.pvt_quality_bad_samples
+        self.pvt_summary["signal_quality_bad_rate"] = round(quality_bad_rate, 6)
+        self.pvt_summary["signal_quality_issues"] = sorted(self.pvt_quality_issues)
+        self.pvt_summary["reference_only"] = True
+        self.pvt_summary["not_used_by_rules"] = True
+        return self.pvt_summary
 
     def _advance_step(self) -> None:
         if not self.active or self.stopping:
@@ -1679,6 +2022,8 @@ class BSenseExperimentApp:
             )
         elif step.event is not None:
             self._push_step_marker(step.event, step.code, step)
+        if step.metadata.get("task_kind") == "pvt":
+            self._start_pvt_block(step)
         if step.start_sound is not None:
             self._play_audio_cue(step.start_sound, step, "start")
         if step.advance == "timed":
@@ -1738,6 +2083,8 @@ class BSenseExperimentApp:
         step = self.plan[self.step_index]
         if step.response_key != "space":
             return None
+        if step.metadata.get("task_kind") == "pvt":
+            return self._handle_pvt_response(step)
         if self.current_response_time is not None:
             return "break"
         self.current_response_time = time.monotonic()
@@ -1803,7 +2150,17 @@ class BSenseExperimentApp:
                 self.form_error.set("当前不适合继续筛查；请按 Esc 中止，必要时按现场安全或医疗流程处理。")
                 self.action_button.configure(state="normal")
                 return
-            if step.event == "readiness_context_start":
+            if step.metadata.get("normalize_readiness_context"):
+                try:
+                    collected = normalize_readiness_context(
+                        {**self.current_context, **collected},
+                        current_run_id=str(self.current_context.get("run", "")),
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    self.form_error.set(str(error))
+                    self.action_button.configure(state="normal")
+                    return
+            if step.metadata.get("merge_form_into_context"):
                 self.current_context.update(collected)
             responses = collected
         if step.block is not None and step.block in self.block_results:
@@ -1843,7 +2200,12 @@ class BSenseExperimentApp:
         step_index = self.step_index
         self.step_completion_started = True
         step = self.plan[self.step_index]
-        if step.response_key is not None:
+        if step.metadata.get("task_kind") == "pvt":
+            completion_data = {
+                **completion_data,
+                "summary": self._finalize_pvt_block(step),
+            }
+        elif step.response_key is not None:
             responded = self.current_response_time is not None
             reaction_time = (
                 round(self.current_response_time - self.step_started, 6)
@@ -2171,6 +2533,7 @@ class BSenseExperimentApp:
     def _cancel_step_callbacks(self) -> None:
         self.step_generation += 1
         self.step_completion_started = True
+        self._cancel_pvt_callbacks()
         for attribute in ("tick_id", "pending_advance_id"):
             callback_id = getattr(self, attribute, None)
             if callback_id is not None:

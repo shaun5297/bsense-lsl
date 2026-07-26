@@ -3,6 +3,8 @@ import unittest
 from bsense_experiment.readiness import (
     assess_readiness,
     classify_sart_trial,
+    normalize_readiness_context,
+    sleep_duration_band,
     summarize_sart_trials,
 )
 
@@ -19,6 +21,76 @@ def completed_trials() -> list[dict[str, object]]:
 
 
 class ReadinessRuleTests(unittest.TestCase):
+    def test_exact_sleep_and_parent_run_derive_rule_context(self) -> None:
+        first = normalize_readiness_context(
+            {
+                "sleep_duration_hours": 7.5,
+                "last_sleep_onset_time": "23:30",
+                "last_wake_time": "07:00",
+                "continuous_awake_hours": 2.0,
+                "caffeine_mg_last_8h": 0.0,
+                "last_caffeine_time": None,
+                "parent_run_id": None,
+                "rest_duration_minutes": None,
+            },
+            current_run_id="002",
+        )
+        self.assertEqual(first["sleep_duration_band"], "7–8小时")
+        self.assertEqual(first["assessment_attempt"], "首次")
+
+        retest = normalize_readiness_context(
+            {
+                **first,
+                "sleep_duration_hours": 5.5,
+                "caffeine_mg_last_8h": 100.0,
+                "last_caffeine_time": "08:15",
+                "parent_run_id": "001",
+                "rest_duration_minutes": 12.0,
+            },
+            current_run_id="002",
+        )
+        self.assertEqual(retest["sleep_duration_band"], "5–6小时")
+        self.assertEqual(retest["assessment_attempt"], "复测")
+        self.assertEqual(retest["parent_run_id"], "001")
+
+    def test_readiness_context_rejects_invalid_linkage_and_times(self) -> None:
+        base = {
+            "sleep_duration_hours": 7.0,
+            "last_sleep_onset_time": "23:30",
+            "last_wake_time": "07:00",
+            "continuous_awake_hours": 2.0,
+            "caffeine_mg_last_8h": 0.0,
+            "last_caffeine_time": None,
+            "parent_run_id": None,
+            "rest_duration_minutes": None,
+        }
+        with self.assertRaisesRegex(ValueError, "HH:MM"):
+            normalize_readiness_context(
+                {**base, "last_wake_time": "7点"},
+                current_run_id="002",
+            )
+        with self.assertRaisesRegex(ValueError, "休息分钟"):
+            normalize_readiness_context(
+                {**base, "parent_run_id": "001"},
+                current_run_id="002",
+            )
+        with self.assertRaisesRegex(ValueError, "不能与当前 Run 相同"):
+            normalize_readiness_context(
+                {
+                    **base,
+                    "parent_run_id": "002",
+                    "rest_duration_minutes": 10.0,
+                },
+                current_run_id="002",
+            )
+
+    def test_sleep_duration_band_boundaries(self) -> None:
+        self.assertEqual(sleep_duration_band(4.99), "少于5小时")
+        self.assertEqual(sleep_duration_band(5.0), "5–6小时")
+        self.assertEqual(sleep_duration_band(6.0), "6–7小时")
+        self.assertEqual(sleep_duration_band(7.0), "7–8小时")
+        self.assertEqual(sleep_duration_band(8.0), "8小时及以上")
+
     def test_sart_trial_classification_separates_false_starts_and_error_types(self) -> None:
         self.assertEqual(classify_sart_trial(True, 0.05)["outcome"], "false_start")
         self.assertEqual(classify_sart_trial(True, None)["outcome"], "omission")

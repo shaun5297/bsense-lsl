@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from typing import Iterable, Mapping
 
@@ -19,6 +20,88 @@ STATUS_PRESENTATION = {
     "rest": ("建议休息", "复测后风险信号仍较明显，建议暂停高风险任务并按单位安全流程处理。"),
     "unable": ("无法评估", "数据质量或有效试次数不足；请检查佩戴和数据流后，以新的 Run 编号重测。"),
 }
+
+_CLOCK_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def sleep_duration_band(hours: float) -> str:
+    """Map exact sleep duration to the legacy rule-engine band."""
+
+    if hours < 5:
+        return "少于5小时"
+    if hours < 6:
+        return "5–6小时"
+    if hours < 7:
+        return "6–7小时"
+    if hours < 8:
+        return "7–8小时"
+    return "8小时及以上"
+
+
+def normalize_readiness_context(
+    values: Mapping[str, object],
+    *,
+    current_run_id: str,
+) -> dict[str, object]:
+    """Validate study metadata and derive fields used by the provisional rules."""
+
+    normalized = {
+        key: values.get(key)
+        for key in (
+            "sleep_duration_hours",
+            "last_sleep_onset_time",
+            "last_wake_time",
+            "continuous_awake_hours",
+            "caffeine_mg_last_8h",
+            "last_caffeine_time",
+            "shift_type",
+            "kss_score",
+            "parent_run_id",
+            "rest_duration_minutes",
+            "ready_to_test",
+        )
+    }
+    for key, label in (
+        ("last_sleep_onset_time", "最近一次入睡时间"),
+        ("last_wake_time", "最近一次起床时间"),
+    ):
+        value = str(values.get(key) or "").strip()
+        if not _CLOCK_TIME_PATTERN.fullmatch(value):
+            raise ValueError(f"{label}必须使用 24 小时制 HH:MM")
+        normalized[key] = value
+
+    caffeine_mg = float(values.get("caffeine_mg_last_8h", 0.0))
+    caffeine_time = str(values.get("last_caffeine_time") or "").strip()
+    if caffeine_mg > 0 and not _CLOCK_TIME_PATTERN.fullmatch(caffeine_time):
+        raise ValueError("摄入咖啡因时必须填写最近摄入时间（HH:MM）")
+    if caffeine_time and not _CLOCK_TIME_PATTERN.fullmatch(caffeine_time):
+        raise ValueError("最近咖啡因摄入时间必须使用 24 小时制 HH:MM")
+    normalized["last_caffeine_time"] = caffeine_time or None
+
+    parent_run_id = str(values.get("parent_run_id") or "").strip()
+    rest_duration = values.get("rest_duration_minutes")
+    if parent_run_id:
+        if not _RUN_ID_PATTERN.fullmatch(parent_run_id):
+            raise ValueError("关联首次检测 Run 只能包含字母、数字、下划线和连字符")
+        if parent_run_id == current_run_id:
+            raise ValueError("关联首次检测 Run 不能与当前 Run 相同")
+        if rest_duration is None or float(rest_duration) <= 0:
+            raise ValueError("复测必须填写大于 0 的实际休息分钟数")
+        normalized["assessment_attempt"] = "复测"
+        normalized["parent_run_id"] = parent_run_id
+        normalized["rest_duration_minutes"] = float(rest_duration)
+    else:
+        if rest_duration not in {None, 0, 0.0}:
+            raise ValueError("填写休息分钟数时必须同时填写关联首次检测 Run")
+        normalized["assessment_attempt"] = "首次"
+        normalized["parent_run_id"] = None
+        normalized["rest_duration_minutes"] = None
+
+    sleep_hours = float(values["sleep_duration_hours"])
+    normalized["sleep_duration_hours"] = sleep_hours
+    normalized["sleep_duration_band"] = sleep_duration_band(sleep_hours)
+    return normalized
 
 
 def classify_sart_trial(

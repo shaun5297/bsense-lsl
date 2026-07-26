@@ -237,9 +237,10 @@ class ProtocolTests(unittest.TestCase):
             },
         )
 
-    def test_m6_readiness_is_reproducible_and_fits_five_minute_screen(self) -> None:
+    def test_m6_readiness_is_reproducible_and_adds_independent_reference(self) -> None:
         first = build_protocol_plan("m6_readiness", seed=42)
         second = build_protocol_plan("m6_readiness", seed=42)
+        demo = build_protocol_plan("m6_readiness", seed=42, readiness_reference=False)
         stimuli = [
             step
             for step in first
@@ -261,16 +262,38 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(all(step.duration == 1.0 for step in stimuli))
         self.assertTrue(all(step.text_duration == 0.5 for step in stimuli))
         self.assertTrue(all(step.text_after == "+" for step in stimuli))
-        self.assertLessEqual(sum(step.duration for step in first), 300.0)
-        self.assertGreaterEqual(sum(step.duration for step in first), 240.0)
+        self.assertGreaterEqual(sum(step.duration for step in first), 420.0)
+        self.assertLessEqual(sum(step.duration for step in first), 480.0)
+        self.assertLessEqual(sum(step.duration for step in demo), 300.0)
+        self.assertFalse(any(step.event == "pvt_start" for step in demo))
+        pvt = next(step for step in first if step.event == "pvt_start")
+        self.assertEqual(pvt.duration, 180.0)
+        self.assertEqual(pvt.metadata["isi_min_s"], 1.0)
+        self.assertEqual(pvt.metadata["isi_max_s"], 4.0)
+        self.assertEqual(pvt.metadata["lapse_threshold_s"], 0.355)
+        self.assertTrue(pvt.metadata["not_used_by_rules"])
+        postcheck = next(step for step in first if step.event == "readiness_postcheck_start")
+        self.assertEqual({field.key for field in postcheck.fields}, {"kss_post_score"})
+        background = next(step for step in first if step.event == "readiness_background_start")
+        self.assertEqual(
+            {field.key for field in background.fields},
+            {
+                "sleep_duration_hours",
+                "last_sleep_onset_time",
+                "last_wake_time",
+                "continuous_awake_hours",
+                "caffeine_mg_last_8h",
+                "last_caffeine_time",
+                "shift_type",
+            },
+        )
         context = next(step for step in first if step.event == "readiness_context_start")
         self.assertEqual(
             {field.key for field in context.fields},
             {
                 "kss_score",
-                "sleep_duration_band",
-                "shift_type",
-                "assessment_attempt",
+                "parent_run_id",
+                "rest_duration_minutes",
                 "ready_to_test",
             },
         )
