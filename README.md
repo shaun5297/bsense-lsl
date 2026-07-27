@@ -77,7 +77,7 @@ bash "macos/run.sh"
 bash "macos/run_monitor.sh"
 ```
 
-macOS 需要带 Tk 的 Python 3.11–3.13；安装脚本会自动选择兼容解释器并创建本项目专用 `.venv`。默认数据目录是 `~/Documents/BCI/data/bsense`。完整的双机连接、权限设置和验证流程见 [macOS 使用说明](docs/MACOS.md)。
+macOS 需要带 Tk 的 Python 3.11–3.13；安装脚本会自动选择机器上已有的兼容解释器并创建本项目专用 `.venv`（脚本不自动下载安装，缺少兼容 Python 时会给出安装指引）。默认数据目录是 `~/Documents/BCI/data/bsense`。完整的双机连接、权限设置和验证流程见 [macOS 使用说明](docs/MACOS.md)。
 
 ## Windows 前置条件
 
@@ -114,7 +114,7 @@ C:\BCI\bsense-lsl
 windows\setup.bat
 ```
 
-它会使用 Python 3.13 创建仓库内的 `.venv`，安装固定版本依赖并运行协议自测。安装脚本会拒绝其他操作系统创建的虚拟环境；虚拟环境不能在 macOS、Linux 和 Windows 之间复制。
+它会使用机器上已有的 Python 3.11–3.13 创建仓库内的 `.venv`，安装固定版本依赖并运行协议自测（脚本不自动下载安装，缺少兼容 Python 时会给出安装指引）；损坏或来自其他操作系统的虚拟环境会自动移开（`.venv.bak.*`）并重建，虚拟环境不能在 macOS、Linux 和 Windows 之间复制。
 
 ### 3. 准备设备
 
