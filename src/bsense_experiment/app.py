@@ -409,6 +409,7 @@ class BSenseExperimentApp:
         self.readiness_quality_issues: set[str] = set()
         self.pvt_trials: list[dict[str, object]] = []
         self.pvt_invalidated_trials: set[int] = set()
+        self.pvt_last_result_row: dict[str, object] | None = None
         self.pvt_summary: dict[str, object] | None = None
         self.pvt_quality_samples = 0
         self.pvt_quality_bad_samples = 0
@@ -1284,8 +1285,14 @@ class BSenseExperimentApp:
             return self._display_visual(step.visual)
         target = step.metadata.get("target_position")
         flash = step.metadata.get("flash_position")
+        phase = step.metadata.get("phase")
+        # 选择阶段隐藏目标边框与名称：target 闪烁画面不能与非 target 存在
+        # 可区分的低层视觉特征，否则造成标签泄漏及训练/在线推理条件不一致。
+        # 目标信息仍完整保留在 Marker 元数据中。
+        if phase == "selection":
+            target = None
         # 指令下发阶段把目标格点亮为实心高亮，作为模拟机器狗执行的视觉反馈。
-        if step.metadata.get("phase") == "command_feedback" and isinstance(target, int):
+        if phase == "command_feedback" and isinstance(target, int):
             flash = target
         return self._display_p300_grid(
             target if isinstance(target, int) else None,
@@ -1418,9 +1425,18 @@ class BSenseExperimentApp:
             return
         step = self.plan[self.step_index] if 0 <= self.step_index < len(self.plan) else None
         is_pvt_step = step is not None and step.metadata.get("task_kind") == "pvt"
-        # 刺激间隙（反馈/ISI 期）操作员看到反应后才标记无效时，回退到最近一个试次，
-        # 不再要求刺激正呈现在屏幕上。
-        pvt_trial = self.pvt_trial_index if is_pvt_step and self.pvt_trial_index > 0 else None
+        # 无效标记作用于最近一条 PVT 结果：刺激呈现中为当前试次；
+        # 刺激间隙为最近一条结果行（可能是上一刺激试次，也可能是等待期
+        # 抢按）。最近结果是抢按（trial=None）时不回退到上一刺激试次。
+        pvt_trial: int | None = None
+        pvt_last_row: dict[str, object] | None = None
+        if is_pvt_step:
+            if self.pvt_stimulus_onset is not None:
+                pvt_trial = self.pvt_trial_index
+            elif event == "trial_invalid" and self.pvt_last_result_row is not None:
+                pvt_last_row = self.pvt_last_result_row
+                last_trial = pvt_last_row.get("trial")
+                pvt_trial = last_trial if isinstance(last_trial, int) else None
         payload = {
             "code": code,
             "event": event,
@@ -1437,11 +1453,15 @@ class BSenseExperimentApp:
             and step.metadata.get("trial_kind") == "assessment"
         ):
             self.readiness_invalidated_steps.add(self.step_index)
-        if event == "trial_invalid" and pvt_trial is not None:
-            self.pvt_invalidated_trials.add(pvt_trial)
-            for row in self.pvt_trials:
-                if row.get("trial") == pvt_trial:
-                    row["invalidated"] = True
+        if event == "trial_invalid" and is_pvt_step:
+            if pvt_last_row is not None:
+                # 直接回写最近结果行（含抢按行），使其退出汇总统计。
+                pvt_last_row["invalidated"] = True
+            if pvt_trial is not None:
+                self.pvt_invalidated_trials.add(pvt_trial)
+                for row in self.pvt_trials:
+                    if row.get("trial") == pvt_trial:
+                        row["invalidated"] = True
         self.progress_label.configure(text=f"已记录：{event}  |  步骤 {self.step_index + 1}/{len(self.plan)}")
         self.task_frame.focus_set()
 
@@ -1638,6 +1658,7 @@ class BSenseExperimentApp:
         self.readiness_quality_issues = set()
         self.pvt_trials = []
         self.pvt_invalidated_trials = set()
+        self.pvt_last_result_row = None
         self.pvt_summary = None
         self.pvt_quality_samples = 0
         self.pvt_quality_bad_samples = 0
@@ -1866,6 +1887,7 @@ class BSenseExperimentApp:
         self.pvt_stimulus_onset = None
         self.pvt_current_isi_s = None
         self.pvt_invalidated_trials = set()
+        self.pvt_last_result_row = None
         self.pvt_quality_samples = 0
         self.pvt_quality_bad_samples = 0
         self.pvt_quality_issues = set()
@@ -1977,6 +1999,7 @@ class BSenseExperimentApp:
             **result,
         }
         self.pvt_trials.append(row)
+        self.pvt_last_result_row = row
         self._push_step_marker(
             str(step.metadata["result_event"]),
             int(step.metadata["result_code"]),

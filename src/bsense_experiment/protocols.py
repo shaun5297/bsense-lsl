@@ -1129,7 +1129,7 @@ def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
                                 "flash_label": flash_label,
                                 "is_target": flash_position == target_position,
                                 "phase": "selection",
-                                "p300_status": f"目标：{target_label}",
+                                "p300_status": "默数目标指令的闪烁",
                             },
                             visual="p300_grid",
                             text_duration=P300_HIGHLIGHT_SECONDS,

@@ -264,6 +264,15 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(command_step.metadata["issued_command"], command_step.metadata["target_command"])
             self.assertTrue(command_step.metadata["simulated_execution"])
         self.assertTrue(all(step.metadata["phase"] == "cue" for step in trials))
+        self.assertTrue(all(step.metadata["phase"] == "selection" for step in flashes))
+        # 选择阶段的渲染文本不得包含目标指令名（目标只保留在 Marker 元数据中）
+        command_labels = {label for _command_id, label, _icon in P300_COMMANDS}
+        self.assertTrue(
+            all(
+                not any(label in step.metadata["p300_status"] for label in command_labels)
+                for step in flashes
+            )
+        )
         self.assertTrue(all(step.metadata["sequences_per_trial"] == 5 for step in trials))
         self.assertEqual(sum(step.event == "p300_rest_start" for step in plan), 2)
         for previous, current in zip(flashes, flashes[1:]):
