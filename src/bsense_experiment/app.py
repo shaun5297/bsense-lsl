@@ -40,6 +40,7 @@ from .platform_support import (
 from .live import DataWindow, LiveStreamManager, STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, describe_stream
 from .protocols import (
     P300_COMMANDS,
+    P300_GRID_POSITIONS,
     PROTOCOLS,
     PROTOCOL_BY_TASK,
     InputField,
@@ -53,6 +54,7 @@ from .readiness import (
     assess_readiness,
     classify_sart_trial,
     normalize_readiness_context,
+    validate_readiness_background,
 )
 from .resources import object_asset_path
 
@@ -407,6 +409,7 @@ class BSenseExperimentApp:
         self.readiness_quality_issues: set[str] = set()
         self.pvt_trials: list[dict[str, object]] = []
         self.pvt_invalidated_trials: set[int] = set()
+        self.pvt_last_result_row: dict[str, object] | None = None
         self.pvt_summary: dict[str, object] | None = None
         self.pvt_quality_samples = 0
         self.pvt_quality_bad_samples = 0
@@ -997,7 +1000,7 @@ class BSenseExperimentApp:
         )
         self.p300_target_label.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 14))
         for position, (_command_id, command_label, command_icon) in enumerate(P300_COMMANDS):
-            row, column = divmod(position, 3)
+            grid_row, grid_column = P300_GRID_POSITIONS[position]
             cell = Frame(
                 self.p300_grid_frame,
                 bg=P300_NORMAL_BG,
@@ -1006,7 +1009,7 @@ class BSenseExperimentApp:
                 padx=24,
                 pady=16,
             )
-            cell.grid(row=row + 1, column=column, sticky="nsew", padx=8, pady=8)
+            cell.grid(row=grid_row + 1, column=grid_column, sticky="nsew", padx=8, pady=8)
             icon_label = Label(
                 cell,
                 text=command_icon,
@@ -1026,7 +1029,7 @@ class BSenseExperimentApp:
             self.p300_cells[position] = (cell, icon_label, text_label)
         for column in range(3):
             self.p300_grid_frame.columnconfigure(column, weight=1, uniform="p300_column")
-        for row in (1, 2):
+        for row in (1, 2, 3):
             self.p300_grid_frame.rowconfigure(row, weight=1, uniform="p300_row")
         self.p300_grid_frame.grid_remove()
         self.cue_label = Label(
@@ -1282,6 +1285,15 @@ class BSenseExperimentApp:
             return self._display_visual(step.visual)
         target = step.metadata.get("target_position")
         flash = step.metadata.get("flash_position")
+        phase = step.metadata.get("phase")
+        # 选择阶段隐藏目标边框与名称：target 闪烁画面不能与非 target 存在
+        # 可区分的低层视觉特征，否则造成标签泄漏及训练/在线推理条件不一致。
+        # 目标信息仍完整保留在 Marker 元数据中。
+        if phase == "selection":
+            target = None
+        # 指令下发阶段把目标格点亮为实心高亮，作为模拟机器狗执行的视觉反馈。
+        if phase == "command_feedback" and isinstance(target, int):
+            flash = target
         return self._display_p300_grid(
             target if isinstance(target, int) else None,
             flash if isinstance(flash, int) else None,
@@ -1309,8 +1321,8 @@ class BSenseExperimentApp:
             variable = StringVar(value="")
             self.form_variables[field.key] = variable
             if field.kind == "rating":
-                minimum = int(field.minimum or 1)
-                maximum = int(field.maximum or 10)
+                minimum = int(field.minimum if field.minimum is not None else 1)
+                maximum = int(field.maximum if field.maximum is not None else 10)
                 values = tuple(str(value) for value in range(minimum, maximum + 1))
             elif field.kind == "boolean":
                 values = ("否", "是")
@@ -1412,13 +1424,19 @@ class BSenseExperimentApp:
         if not self.active or self.stopping:
             return
         step = self.plan[self.step_index] if 0 <= self.step_index < len(self.plan) else None
-        pvt_trial = (
-            self.pvt_trial_index
-            if step is not None
-            and step.metadata.get("task_kind") == "pvt"
-            and self.pvt_stimulus_onset is not None
-            else None
-        )
+        is_pvt_step = step is not None and step.metadata.get("task_kind") == "pvt"
+        # 无效标记作用于最近一条 PVT 结果：刺激呈现中为当前试次；
+        # 刺激间隙为最近一条结果行（可能是上一刺激试次，也可能是等待期
+        # 抢按）。最近结果是抢按（trial=None）时不回退到上一刺激试次。
+        pvt_trial: int | None = None
+        pvt_last_row: dict[str, object] | None = None
+        if is_pvt_step:
+            if self.pvt_stimulus_onset is not None:
+                pvt_trial = self.pvt_trial_index
+            elif event == "trial_invalid" and self.pvt_last_result_row is not None:
+                pvt_last_row = self.pvt_last_result_row
+                last_trial = pvt_last_row.get("trial")
+                pvt_trial = last_trial if isinstance(last_trial, int) else None
         payload = {
             "code": code,
             "event": event,
@@ -1435,8 +1453,15 @@ class BSenseExperimentApp:
             and step.metadata.get("trial_kind") == "assessment"
         ):
             self.readiness_invalidated_steps.add(self.step_index)
-        if event == "trial_invalid" and pvt_trial is not None:
-            self.pvt_invalidated_trials.add(pvt_trial)
+        if event == "trial_invalid" and is_pvt_step:
+            if pvt_last_row is not None:
+                # 直接回写最近结果行（含抢按行），使其退出汇总统计。
+                pvt_last_row["invalidated"] = True
+            if pvt_trial is not None:
+                self.pvt_invalidated_trials.add(pvt_trial)
+                for row in self.pvt_trials:
+                    if row.get("trial") == pvt_trial:
+                        row["invalidated"] = True
         self.progress_label.configure(text=f"已记录：{event}  |  步骤 {self.step_index + 1}/{len(self.plan)}")
         self.task_frame.focus_set()
 
@@ -1633,6 +1658,7 @@ class BSenseExperimentApp:
         self.readiness_quality_issues = set()
         self.pvt_trials = []
         self.pvt_invalidated_trials = set()
+        self.pvt_last_result_row = None
         self.pvt_summary = None
         self.pvt_quality_samples = 0
         self.pvt_quality_bad_samples = 0
@@ -1861,6 +1887,7 @@ class BSenseExperimentApp:
         self.pvt_stimulus_onset = None
         self.pvt_current_isi_s = None
         self.pvt_invalidated_trials = set()
+        self.pvt_last_result_row = None
         self.pvt_quality_samples = 0
         self.pvt_quality_bad_samples = 0
         self.pvt_quality_issues = set()
@@ -1972,6 +1999,7 @@ class BSenseExperimentApp:
             **result,
         }
         self.pvt_trials.append(row)
+        self.pvt_last_result_row = row
         self._push_step_marker(
             str(step.metadata["result_event"]),
             int(step.metadata["result_code"]),
@@ -2003,11 +2031,15 @@ class BSenseExperimentApp:
             outcome=result["outcome"],
         )
         self._record_pvt_result(step, result, stimulus_present=stimulus_present)
-        feedback = (
-            "过早"
-            if result["outcome"] == "false_start"
-            else f"{float(result['reaction_time_s']) * 1000:.0f} ms"
-        )
+        if not stimulus_present:
+            # 抢按只记录并提示，不取消已排程的刺激、不重抽 ISI（标准 PVT-B 时序）。
+            self.cue_label.configure(
+                text="过早",
+                font=(UI_FONT_FAMILY, 64, "bold"),
+                foreground=TASK_ACCENT,
+            )
+            return "break"
+        feedback = f"{float(result['reaction_time_s']) * 1000:.0f} ms"
         self._schedule_next_pvt_stimulus(step, feedback_text=feedback)
         return "break"
 
@@ -2020,7 +2052,7 @@ class BSenseExperimentApp:
             return
         step = self.plan[step_index]
         result = classify_pvt_response(
-            float(step.metadata.get("response_timeout_s", 30.0)),
+            None,
             stimulus_present=True,
             lapse_threshold_s=float(step.metadata.get("lapse_threshold_s", 0.355)),
             timed_out=True,
@@ -2169,7 +2201,12 @@ class BSenseExperimentApp:
         play_audio_cue(cue)
 
     def _on_response_key(self, _event: object) -> str | None:
-        if not self.active or self.stopping or not 0 <= self.step_index < len(self.plan):
+        if (
+            not self.active
+            or self.stopping
+            or self.step_completion_started
+            or not 0 <= self.step_index < len(self.plan)
+        ):
             return None
         step = self.plan[self.step_index]
         if step.response_key != "space":
@@ -2241,6 +2278,13 @@ class BSenseExperimentApp:
                 self.form_error.set("当前不适合继续筛查；请按 Esc 中止，必要时按现场安全或医疗流程处理。")
                 self.action_button.configure(state="normal")
                 return
+            if step.event == "readiness_background_start":
+                try:
+                    validate_readiness_background(collected)
+                except ValueError as error:
+                    self.form_error.set(str(error))
+                    self.action_button.configure(state="normal")
+                    return
             if step.metadata.get("normalize_readiness_context"):
                 try:
                     collected = normalize_readiness_context(

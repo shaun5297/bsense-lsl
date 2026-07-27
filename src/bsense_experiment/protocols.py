@@ -72,7 +72,7 @@ PROTOCOLS = (
     ProtocolInfo("m4a_intent", "M4A 提示后意图", "有提示的拿取意图与无意图二分类", "探索"),
     ProtocolInfo("m4b_target", "M4B 目标注意（探索）", "三物体串行高亮中的目标注意", "探索"),
     ProtocolInfo("m6_readiness", "M6 脑状态安检", "上岗前 3–5 分钟认知状态快速筛查", "赛道7"),
-    ProtocolInfo("m7_p300", "M7 P300 指令采集（探索）", "六宫格控制指令随机高亮与目标注意", "探索"),
+    ProtocolInfo("m7_p300", "M7 机器狗指令 P300（探索）", "方向宫格 P300 指令选择与模拟下发反馈", "探索"),
     ProtocolInfo("m5_debrief", "M5 结束问卷", "整体体验、困倦、舒适度与不适记录", "建议"),
 )
 
@@ -86,8 +86,20 @@ P300_COMMANDS = (
     ("stop", "急停", "■"),
     ("idle", "待机", "●"),
 )
+# 十字方向布局：刺激位置与机器狗运动方向空间一致（上=前进、下=后退、
+# 左=左转、右=右转、中央=急停），待机放在左下角。取值为 3×3 宫格的 (row, column)。
+P300_GRID_POSITIONS: dict[int, tuple[int, int]] = {
+    0: (0, 1),  # forward  上
+    1: (2, 1),  # backward 下
+    2: (1, 0),  # left     左
+    3: (1, 2),  # right    右
+    4: (1, 1),  # stop     中央
+    5: (2, 0),  # idle     左下
+}
 P300_HIGHLIGHT_SECONDS = 0.1
 P300_SOA_SECONDS = 0.175
+P300_CUE_SECONDS = 2.0
+P300_COMMAND_FEEDBACK_SECONDS = 1.5
 
 
 def _shuffle_without_long_streaks(
@@ -994,28 +1006,36 @@ def _build_p300_sequence(rng: random.Random, previous_position: int | None) -> l
 
 
 def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]:
-    """Build the six-command P300 acquisition protocol."""
+    """Build the robot-dog command P300 acquisition protocol.
+
+    Each trial is one control episode mirroring common BCI teleoperation
+    datasets: 目标提示 → 闪烁选择 → 指令下发（模拟机器狗执行反馈）→ 试次间隔。
+    """
 
     rng = random.Random(seed)
     block_count = 1 if short else 3
-    trials_per_target = 1 if short else 20
-    sequences_per_trial = 1 if short else 10
+    trials_per_target = 1 if short else 10
+    sequences_per_trial = 1 if short else 5
     rest_seconds = 1.0 if short else 120.0
-    trial_prepare_seconds = 0.3 if short else 0.5
+    cue_seconds = 0.3 if short else P300_CUE_SECONDS
+    command_feedback_seconds = 0.2 if short else P300_COMMAND_FEEDBACK_SECONDS
     trial_interval_seconds = 0.2 if short else 0.8
     paradigm_metadata = {
-        "paradigm": "p300_six_command_single_stimulus",
+        "paradigm": "p300_robot_dog_command_selection",
         "highlight_duration_s": P300_HIGHLIGHT_SECONDS,
         "soa_s": P300_SOA_SECONDS,
         "sequences_per_trial": sequences_per_trial,
+        "cue_duration_s": cue_seconds,
+        "command_feedback_duration_s": command_feedback_seconds,
+        "layout": "directional_cross",
         "eeg_analysis_scope": "event_related_exploratory",
         "fnirs_analysis_scope": "block_level_only",
         "device_channel_limit": "fp1_fp2_not_p300_optimal",
     }
     body: list[Step] = [
         Step(
-            "M7 P300 指令采集",
-            "每轮六个指令各闪一次；请始终注视当前指定目标，不要追随其他闪烁格子",
+            "M7 机器狗指令 P300 采集",
+            "宫格按运动方向排列；每轮六个指令各闪一次，请始终注视当前指定目标，不要追随其他闪烁格子",
             1.0 if short else 10.0,
             "p300_instruction",
             800,
@@ -1023,7 +1043,7 @@ def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
                 **paradigm_metadata,
                 "target_position": None,
                 "flash_position": None,
-                "p300_status": "请熟悉六个控制指令",
+                "p300_status": "请熟悉六个机器狗控制指令",
             },
             visual="p300_grid",
         )
@@ -1065,11 +1085,12 @@ def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
                 "target_command": target_id,
                 "target_label": target_label,
             }
+            # 阶段 1：目标提示（cue）
             body.append(
                 Step(
                     "",
                     "",
-                    trial_prepare_seconds,
+                    cue_seconds,
                     "p300_trial_start",
                     802,
                     block,
@@ -1077,11 +1098,13 @@ def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
                     metadata={
                         **trial_metadata,
                         "flash_position": None,
+                        "phase": "cue",
                         "p300_status": f"目标：{target_label}",
                     },
                     visual="p300_grid",
                 )
             )
+            # 阶段 2：闪烁选择
             previous_position: int | None = None
             for sequence in range(1, sequences_per_trial + 1):
                 flash_order = _build_p300_sequence(rng, previous_position)
@@ -1105,13 +1128,36 @@ def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
                                 "flash_command": flash_id,
                                 "flash_label": flash_label,
                                 "is_target": flash_position == target_position,
-                                "p300_status": f"目标：{target_label}",
+                                "phase": "selection",
+                                "p300_status": "默数目标指令的闪烁",
                             },
                             visual="p300_grid",
                             text_duration=P300_HIGHLIGHT_SECONDS,
                             text_after="",
                         )
                     )
+            # 阶段 3：指令下发（模拟机器狗执行反馈），让每段数据对应一次完整控制回合
+            body.append(
+                Step(
+                    "",
+                    "",
+                    command_feedback_seconds,
+                    "p300_command",
+                    810,
+                    block,
+                    trial_in_block,
+                    metadata={
+                        **trial_metadata,
+                        "flash_position": None,
+                        "phase": "command_feedback",
+                        "issued_command": target_id,
+                        "simulated_execution": True,
+                        "p300_status": f"已下发指令：{target_label}",
+                    },
+                    visual="p300_grid",
+                )
+            )
+            # 阶段 4：试次间隔
             body.append(
                 Step(
                     "",
@@ -1124,6 +1170,7 @@ def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]
                     metadata={
                         **trial_metadata,
                         "flash_position": None,
+                        "phase": "inter_trial_interval",
                         "p300_status": f"Trial {trial_in_block} 完成",
                     },
                     visual="p300_grid",
@@ -1454,7 +1501,9 @@ def build_m6_plan(
                 ),
                 Step(
                     "PVT 说明",
-                    "看到黄色计时数字后尽快按空格；等待期间不要抢按。任务持续 3 分钟。",
+                    f"看到黄色计时数字后尽快按空格；等待期间不要抢按。任务持续 {pvt_duration / 60:.0f} 分钟。"
+                    if not short
+                    else "看到黄色计时数字后尽快按空格；等待期间不要抢按。",
                     1.0 if short else 5.0,
                     "pvt_instruction",
                     735,
@@ -1492,7 +1541,11 @@ def build_m6_plan(
     body.append(
         Step(
             "正在生成结果",
-            "PVT 只作为独立研究参照，不进入当前四态规则。",
+            (
+                "PVT 只作为独立研究参照，不进入当前四态规则。"
+                if readiness_reference
+                else "结果仅供当班状态筛查与复测辅助。"
+            ),
             0.5 if short else 4.0,
             "readiness_assessment",
             730,

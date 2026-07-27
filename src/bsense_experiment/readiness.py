@@ -39,6 +39,31 @@ def sleep_duration_band(hours: float) -> str:
     return "8小时及以上"
 
 
+def validate_readiness_background(values: Mapping[str, object]) -> None:
+    """Validate the background form at its own step so errors surface where they can be fixed."""
+
+    for key, label in (
+        ("last_sleep_onset_time", "最近一次入睡时间"),
+        ("last_wake_time", "最近一次起床时间"),
+    ):
+        value = str(values.get(key) or "").strip()
+        if not _CLOCK_TIME_PATTERN.fullmatch(value):
+            raise ValueError(f"{label}必须使用 24 小时制 HH:MM（含前导零，如 09:05）")
+    caffeine_time = str(values.get("last_caffeine_time") or "").strip()
+    if caffeine_time and not _CLOCK_TIME_PATTERN.fullmatch(caffeine_time):
+        raise ValueError("最近咖啡因摄入时间必须使用 24 小时制 HH:MM（含前导零，如 09:05）")
+
+
+def _parse_nonnegative_float(value: object, label: str) -> float:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}必须是数字") from None
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{label}必须是不小于 0 的有效数字")
+    return parsed
+
+
 def normalize_readiness_context(
     values: Mapping[str, object],
     *,
@@ -62,21 +87,14 @@ def normalize_readiness_context(
             "ready_to_test",
         )
     }
-    for key, label in (
-        ("last_sleep_onset_time", "最近一次入睡时间"),
-        ("last_wake_time", "最近一次起床时间"),
-    ):
-        value = str(values.get(key) or "").strip()
-        if not _CLOCK_TIME_PATTERN.fullmatch(value):
-            raise ValueError(f"{label}必须使用 24 小时制 HH:MM")
-        normalized[key] = value
+    validate_readiness_background(values)
+    normalized["last_sleep_onset_time"] = str(values.get("last_sleep_onset_time") or "").strip()
+    normalized["last_wake_time"] = str(values.get("last_wake_time") or "").strip()
 
-    caffeine_mg = float(values.get("caffeine_mg_last_8h", 0.0))
+    caffeine_mg = _parse_nonnegative_float(values.get("caffeine_mg_last_8h", 0.0), "咖啡因摄入量")
     caffeine_time = str(values.get("last_caffeine_time") or "").strip()
-    if caffeine_mg > 0 and not _CLOCK_TIME_PATTERN.fullmatch(caffeine_time):
+    if caffeine_mg > 0 and not caffeine_time:
         raise ValueError("摄入咖啡因时必须填写最近摄入时间（HH:MM）")
-    if caffeine_time and not _CLOCK_TIME_PATTERN.fullmatch(caffeine_time):
-        raise ValueError("最近咖啡因摄入时间必须使用 24 小时制 HH:MM")
     normalized["last_caffeine_time"] = caffeine_time or None
 
     parent_run_id = str(values.get("parent_run_id") or "").strip()
@@ -86,19 +104,24 @@ def normalize_readiness_context(
             raise ValueError("关联首次检测 Run 只能包含字母、数字、下划线和连字符")
         if parent_run_id == current_run_id:
             raise ValueError("关联首次检测 Run 不能与当前 Run 相同")
-        if rest_duration is None or float(rest_duration) <= 0:
+        if rest_duration is None:
+            raise ValueError("复测必须填写大于 0 的实际休息分钟数")
+        rest_minutes = _parse_nonnegative_float(rest_duration, "实际休息分钟数")
+        if rest_minutes <= 0:
             raise ValueError("复测必须填写大于 0 的实际休息分钟数")
         normalized["assessment_attempt"] = "复测"
         normalized["parent_run_id"] = parent_run_id
-        normalized["rest_duration_minutes"] = float(rest_duration)
+        normalized["rest_duration_minutes"] = rest_minutes
     else:
-        if rest_duration not in {None, 0, 0.0}:
+        if rest_duration is not None and _parse_nonnegative_float(rest_duration, "实际休息分钟数") != 0:
             raise ValueError("填写休息分钟数时必须同时填写关联首次检测 Run")
         normalized["assessment_attempt"] = "首次"
         normalized["parent_run_id"] = None
         normalized["rest_duration_minutes"] = None
 
-    sleep_hours = float(values["sleep_duration_hours"])
+    sleep_hours = _parse_nonnegative_float(values.get("sleep_duration_hours"), "过去 24 小时累计睡眠")
+    if sleep_hours > 24:
+        raise ValueError("过去 24 小时累计睡眠不能超过 24 小时")
     normalized["sleep_duration_hours"] = sleep_hours
     normalized["sleep_duration_band"] = sleep_duration_band(sleep_hours)
     return normalized
@@ -212,10 +235,14 @@ def assess_readiness(
     try:
         kss_score = int(context["kss_score"])
         kss_missing = False
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError):
         kss_score = 0
         kss_missing = True
         reason_codes.append("missing_kss")
+    except ValueError:
+        kss_score = 0
+        kss_missing = True
+        reason_codes.append("invalid_kss")
 
     if not signal_quality_ok:
         reason_codes.append("signal_quality_gate_failed")

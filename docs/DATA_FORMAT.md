@@ -62,7 +62,7 @@ BioMultiLite 的 fNIRS 流保存的是设备发布的 735/850 nm 原始光学通
 - M3B：`segment`、`position_in_block`、`elapsed_minutes`、`sequence_reset`、`kss_score`、`mental_fatigue_score`，并有任务后恢复边界；
 - M4A：`has_intent`、`object`、`condition`、`paradigm=externally_cued_intent` 以及模块级主观评分；
 - M4B：`round`、`position`、`object`、`target_object`、`is_target`、`eeg_analysis_scope`、`fnirs_analysis_scope`；
-- M7：`block_number`、`trial_in_block`、`global_trial`、`target_position`、`target_command`、`sequence`、`position_in_sequence`、`flash_position`、`flash_command`、`is_target`、`highlight_duration_s` 和 `soa_s`；模块末保存 6 个 Raw NASA-TLX 分量；
+- M7：`block_number`、`trial_in_block`、`global_trial`、`target_position`、`target_command`、`sequence`、`position_in_sequence`、`flash_position`、`flash_command`、`is_target`、`phase`（cue/selection/command_feedback/inter_trial_interval）、`highlight_duration_s` 和 `soa_s`；`p300_command` 另含 `issued_command`、`simulated_execution`；模块末保存 6 个 Raw NASA-TLX 分量；
 - M6：背景表单包含 `sleep_duration_hours`、最近入睡/起床时间、`continuous_awake_hours`、咖啡因剂量/时间和 `shift_type`；采前表单包含 `kss_score`、`parent_run_id`、`rest_duration_minutes`，程序派生 `sleep_duration_band` 与 `assessment_attempt`；采后表单记录 `kss_post_score`；SART 包含 `should_respond`、`outcome`、`false_start`、`reaction_time_s`；PVT 使用 `pvt_stimulus`、`pvt_response`、`pvt_trial_result`、`pvt_end`，逐试次保存 ISI、RT、`hit/lapse/false_start/timeout` 和无效标志；`readiness_assessment.assessment` 保存四态结果、原因码、行为汇总、EEG 质量门控统计、`algorithm_version=rules_v1_provisional` 及不参与规则的 `external_reference`；
 - M5：`kss_score`、`mi_difficulty`、`easiest_task`、`hardest_task`、`device_comfort` 和三类不适布尔值；
 - 提示音：`audio_cue`、`audio_phase`、`audio_text`、`audio_voice`；操作员异常标签使用编码 900–902，自动 M1 动作复核候选使用编码 903。

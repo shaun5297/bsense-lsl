@@ -103,6 +103,15 @@ class EmbeddedRecorderClient:
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _info_number(info: Any, method_name: str, default: float, cast: type = float) -> float | int:
+        """Read a numeric info attribute, falling back to default on any failure."""
+
+        try:
+            return cast(getattr(info, method_name)())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return default
+
     @classmethod
     def _runtime_stream_key(cls, info: Any) -> tuple[str, object]:
         """Identify one outlet even when multihomed discovery changes its UID view."""
@@ -110,21 +119,21 @@ class EmbeddedRecorderClient:
         name = str(cls._info_value(info, "name", "")).strip()
         stream_type = str(cls._info_value(info, "type", "")).strip()
         hostname = str(cls._info_value(info, "hostname", "")).strip()
-        channel_count = int(cls._info_value(info, "channel_count", 0))
-        channel_format = int(cls._info_value(info, "channel_format", 0))
-        nominal_srate = float(cls._info_value(info, "nominal_srate", 0.0))
+        channel_count = int(cls._info_number(info, "channel_count", 0, int))
+        channel_format = int(cls._info_number(info, "channel_format", 0, int))
+        nominal_srate = float(cls._info_number(info, "nominal_srate", 0.0))
         metadata = (hostname, name, stream_type, channel_count, channel_format, nominal_srate)
 
         source_id = str(cls._info_value(info, "source_id", "")).strip()
         if source_id:
             return "source_id", (source_id, *metadata)
 
-        created_at = float(cls._info_value(info, "created_at", 0.0))
+        created_at = float(cls._info_number(info, "created_at", 0.0))
         if created_at > 0 and name and stream_type:
             # created_at belongs to the outlet instance and is copied unchanged
             # into each resolver view, unlike the UID observed with some
             # multihomed liblsl/provider combinations.
-            return "outlet_instance", (round(created_at, 9), *metadata)
+            return "outlet_instance", (created_at, *metadata)
 
         uid = str(cls._info_value(info, "uid", "")).strip()
         if uid:
@@ -142,9 +151,10 @@ class EmbeddedRecorderClient:
             "hostname": str(cls._info_value(info, "hostname", "")),
             "source_id": str(cls._info_value(info, "source_id", "")),
             "uid": str(cls._info_value(info, "uid", "")),
-            "created_at": float(cls._info_value(info, "created_at", 0.0)),
-            "channel_count": int(cls._info_value(info, "channel_count", 0)),
-            "nominal_srate": float(cls._info_value(info, "nominal_srate", 0.0)),
+            "created_at": float(cls._info_number(info, "created_at", 0.0)),
+            "channel_count": int(cls._info_number(info, "channel_count", 0, int)),
+            "channel_format": int(cls._info_number(info, "channel_format", 0, int)),
+            "nominal_srate": float(cls._info_number(info, "nominal_srate", 0.0)),
         }
 
     def _deduplicate_resolved_streams(
@@ -239,7 +249,7 @@ class EmbeddedRecorderClient:
             discovered_count=len(resolved_infos),
             unique_discovered_count=len(discovered_infos),
             resolver_duplicate_count=len(resolver_duplicates),
-            resolver_duplicate_names=[str(info.name()) for info in resolver_duplicates],
+            resolver_duplicate_names=[str(self._info_value(info, "name", "")) for info in resolver_duplicates],
             selected_count=len(infos),
             selected_names=[str(info.name()) for info in infos],
         )

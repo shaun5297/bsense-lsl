@@ -1,4 +1,5 @@
 import random
+import random
 import threading
 import time
 import unittest
@@ -249,6 +250,7 @@ class AppAsyncTests(unittest.TestCase):
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.active = True
         app.stopping = False
+        app.step_completion_started = False
         app.step_index = 0
         app.plan = [Step("B", "", 2.0, response_key="space", metadata={"is_target": False})]
         app.current_response_time = None
@@ -274,6 +276,7 @@ class AppAsyncTests(unittest.TestCase):
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.active = True
         app.stopping = False
+        app.step_completion_started = False
         app.step_index = 0
         app.plan = [
             Step(
@@ -382,6 +385,7 @@ class AppAsyncTests(unittest.TestCase):
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.active = True
         app.stopping = False
+        app.step_completion_started = False
         app.step_index = 0
         app.plan = [
             Step(
@@ -423,6 +427,7 @@ class AppAsyncTests(unittest.TestCase):
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
         app.active = True
         app.stopping = False
+        app.step_completion_started = False
         app.step_index = 0
         app.plan = [Step("B", "", 2.0, response_key="space", metadata={"is_target": True})]
         app.current_response_time = None
@@ -606,6 +611,182 @@ class AppAsyncTests(unittest.TestCase):
 
         self.assertEqual(pushed[0]["event"], "trial_invalid")
         self.assertEqual(app.readiness_invalidated_steps, {0})
+
+    def _pvt_step(self) -> Step:
+        return Step(
+            "+",
+            "",
+            180.0,
+            "pvt_start",
+            740,
+            "pvt_reference",
+            response_key="space",
+            metadata={
+                "task_kind": "pvt",
+                "isi_min_s": 1.0,
+                "isi_max_s": 4.0,
+                "false_start_threshold_s": 0.1,
+                "lapse_threshold_s": 0.355,
+                "response_timeout_s": 30.0,
+                "stimulus_event": "pvt_stimulus",
+                "stimulus_code": 741,
+                "response_event": "pvt_response",
+                "response_code": 742,
+                "result_event": "pvt_trial_result",
+                "result_code": 743,
+            },
+        )
+
+    def test_pvt_false_start_does_not_reschedule_stimulus(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_completion_started = False
+        app.step_index = 0
+        app.plan = [self._pvt_step()]
+        app.pvt_stimulus_onset = None
+        app.pvt_trial_index = 1
+        app.pvt_current_isi_s = 2.0
+        app.pvt_invalidated_trials = set()
+        app.pvt_trials = []
+        app.pvt_stimulus_id = "pending-stimulus"
+        app.cue_label = FakeLabel()
+        app._push_step_marker = lambda *_args, **_values: None
+
+        app._handle_pvt_response(app.plan[0])
+
+        self.assertEqual(app.pvt_stimulus_id, "pending-stimulus")
+        self.assertEqual(app.pvt_trials[0]["outcome"], "false_start")
+        self.assertEqual(app.cue_label.options["text"], "过早")
+
+    def test_response_key_is_ignored_after_step_completion(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_completion_started = True
+        app.step_index = 0
+        app.plan = [self._pvt_step()]
+        calls: list[str] = []
+        app._handle_pvt_response = lambda _step: (calls.append("pvt"), "break")[1]
+
+        result = app._on_response_key(None)
+
+        self.assertIsNone(result)
+        self.assertEqual(calls, [])
+
+    def test_pvt_trial_invalid_falls_back_to_most_recent_trial(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.plan = [self._pvt_step()]
+        app.current_context = {}
+        app.pvt_stimulus_onset = None
+        app.pvt_trial_index = 3
+        last_row: dict[str, object] = {"trial": 3, "outcome": "hit", "invalidated": False}
+        app.pvt_last_result_row = last_row
+        app.pvt_invalidated_trials = set()
+        app.pvt_trials = [last_row]
+        app.readiness_invalidated_steps = set()
+        app.progress_label = FakeLabel()
+        app.task_frame = type("FakeFrame", (), {"focus_set": lambda self: None})()
+        pushed: list[dict[str, object]] = []
+        app._push_marker = lambda payload: pushed.append(payload)
+
+        app._send_quality_marker("trial_invalid", 900)
+
+        self.assertEqual(pushed[0]["trial"], 3)
+        self.assertEqual(app.pvt_invalidated_trials, {3})
+        self.assertTrue(app.pvt_trials[0]["invalidated"])
+
+    def test_pvt_trial_invalid_after_false_start_does_not_touch_previous_trial(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.active = True
+        app.stopping = False
+        app.step_index = 0
+        app.plan = [self._pvt_step()]
+        app.current_context = {}
+        app.pvt_stimulus_onset = None
+        app.pvt_trial_index = 3
+        hit_row: dict[str, object] = {"trial": 3, "outcome": "hit", "invalidated": False}
+        false_start_row: dict[str, object] = {
+            "trial": None,
+            "outcome": "false_start",
+            "invalidated": False,
+        }
+        app.pvt_last_result_row = false_start_row
+        app.pvt_invalidated_trials = set()
+        app.pvt_trials = [hit_row, false_start_row]
+        app.readiness_invalidated_steps = set()
+        app.progress_label = FakeLabel()
+        app.task_frame = type("FakeFrame", (), {"focus_set": lambda self: None})()
+        pushed: list[dict[str, object]] = []
+        app._push_marker = lambda payload: pushed.append(payload)
+
+        app._send_quality_marker("trial_invalid", 900)
+
+        self.assertTrue(false_start_row["invalidated"])
+        self.assertFalse(hit_row["invalidated"])
+        self.assertEqual(app.pvt_invalidated_trials, set())
+
+    def test_p300_selection_hides_target_marker_but_cue_and_feedback_show_it(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        rendered: list[tuple[object, object, str]] = []
+        app._display_p300_grid = lambda target, flash, status: (rendered.append((target, flash, status)), True)[1]
+
+        def step_with(phase: str) -> Step:
+            return Step(
+                "",
+                "",
+                1.0,
+                "p300_flash",
+                803,
+                "p300_block_1",
+                1,
+                metadata={
+                    "target_position": 0,
+                    "flash_position": 3,
+                    "phase": phase,
+                    "p300_status": "状态",
+                },
+                visual="p300_grid",
+            )
+
+        app._display_step_visual(step_with("cue"))
+        app._display_step_visual(step_with("selection"))
+        app._display_step_visual(step_with("command_feedback"))
+
+        self.assertEqual(rendered[0], (0, 3, "状态"))
+        self.assertEqual(rendered[1], (None, 3, "状态"))
+        self.assertEqual(rendered[2], (0, 0, "状态"))
+
+    def test_pvt_timeout_records_null_reaction_time(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.root = FakeRoot()
+        app.active = True
+        app.stopping = False
+        app.step_completion_started = False
+        app.step_generation = 1
+        app.step_index = 0
+        app.plan = [self._pvt_step()]
+        app.pvt_stimulus_onset = time.monotonic()
+        app.pvt_trial_index = 1
+        app.pvt_current_isi_s = 2.0
+        app.pvt_invalidated_trials = set()
+        app.pvt_trials = []
+        app.pvt_rng = random.Random(1)
+        app.pvt_stimulus_id = None
+        app.pvt_counter_id = None
+        app.pvt_feedback_id = None
+        app.pvt_timeout_id = None
+        app.cue_label = FakeLabel()
+        markers: list[dict[str, object]] = []
+        app._push_step_marker = lambda _e, _c, _s, **values: markers.append(values)
+
+        app._pvt_response_timeout(generation=1, step_index=0)
+
+        self.assertEqual(markers[0]["outcome"], "timeout")
+        self.assertIsNone(markers[0]["reaction_time_s"])
 
     def test_readiness_quality_gate_and_public_result_hide_detailed_metrics(self) -> None:
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)
