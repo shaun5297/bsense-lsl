@@ -72,10 +72,22 @@ PROTOCOLS = (
     ProtocolInfo("m4a_intent", "M4A 提示后意图", "有提示的拿取意图与无意图二分类", "探索"),
     ProtocolInfo("m4b_target", "M4B 目标注意（探索）", "三物体串行高亮中的目标注意", "探索"),
     ProtocolInfo("m6_readiness", "M6 脑状态安检", "上岗前 3–5 分钟认知状态快速筛查", "赛道7"),
+    ProtocolInfo("m7_p300", "M7 P300 指令采集（探索）", "六宫格控制指令随机高亮与目标注意", "探索"),
     ProtocolInfo("m5_debrief", "M5 结束问卷", "整体体验、困倦、舒适度与不适记录", "建议"),
 )
 
 PROTOCOL_BY_TASK = {protocol.task: protocol for protocol in PROTOCOLS}
+
+P300_COMMANDS = (
+    ("forward", "前进", "↑"),
+    ("backward", "后退", "↓"),
+    ("left", "左转", "←"),
+    ("right", "右转", "→"),
+    ("stop", "急停", "■"),
+    ("idle", "待机", "●"),
+)
+P300_HIGHLIGHT_SECONDS = 0.1
+P300_SOA_SECONDS = 0.175
 
 
 def _shuffle_without_long_streaks(
@@ -969,9 +981,230 @@ def build_m4b_plan(
     return _experiment_bounds("m4b_target", body)
 
 
+def _build_p300_sequence(rng: random.Random, previous_position: int | None) -> list[int]:
+    """Return one balanced flash sequence without a duplicate at a sequence boundary."""
+
+    positions = list(range(len(P300_COMMANDS)))
+    for _attempt in range(20):
+        rng.shuffle(positions)
+        if previous_position is None or positions[0] != previous_position:
+            return positions.copy()
+    positions[0], positions[1] = positions[1], positions[0]
+    return positions
+
+
+def build_m7_plan(short: bool = False, seed: int = 0, **_: object) -> list[Step]:
+    """Build the six-command P300 acquisition protocol."""
+
+    rng = random.Random(seed)
+    block_count = 1 if short else 3
+    trials_per_target = 1 if short else 20
+    sequences_per_trial = 1 if short else 10
+    rest_seconds = 1.0 if short else 120.0
+    trial_prepare_seconds = 0.3 if short else 0.5
+    trial_interval_seconds = 0.2 if short else 0.8
+    paradigm_metadata = {
+        "paradigm": "p300_six_command_single_stimulus",
+        "highlight_duration_s": P300_HIGHLIGHT_SECONDS,
+        "soa_s": P300_SOA_SECONDS,
+        "sequences_per_trial": sequences_per_trial,
+        "eeg_analysis_scope": "event_related_exploratory",
+        "fnirs_analysis_scope": "block_level_only",
+        "device_channel_limit": "fp1_fp2_not_p300_optimal",
+    }
+    body: list[Step] = [
+        Step(
+            "M7 P300 指令采集",
+            "每轮六个指令各闪一次；请始终注视当前指定目标，不要追随其他闪烁格子",
+            1.0 if short else 10.0,
+            "p300_instruction",
+            800,
+            metadata={
+                **paradigm_metadata,
+                "target_position": None,
+                "flash_position": None,
+                "p300_status": "请熟悉六个控制指令",
+            },
+            visual="p300_grid",
+        )
+    ]
+    global_trial = 0
+    for block_number in range(1, block_count + 1):
+        block = f"p300_block_{block_number}"
+        body.append(
+            Step(
+                f"Block {block_number}/{block_count}",
+                "保持坐姿和头部稳定，眨眼请尽量安排在 Trial 间隔",
+                0.5 if short else 3.0,
+                "p300_block_start",
+                801,
+                block,
+                metadata={
+                    **paradigm_metadata,
+                    "block_number": block_number,
+                    "block_count": block_count,
+                    "trials_in_block": len(P300_COMMANDS) * trials_per_target,
+                    "target_position": None,
+                    "flash_position": None,
+                    "p300_status": f"Block {block_number}/{block_count} 即将开始",
+                },
+                visual="p300_grid",
+            )
+        )
+        trial_targets = list(range(len(P300_COMMANDS))) * trials_per_target
+        rng.shuffle(trial_targets)
+        for trial_in_block, target_position in enumerate(trial_targets, start=1):
+            global_trial += 1
+            target_id, target_label, _target_icon = P300_COMMANDS[target_position]
+            trial_metadata = {
+                **paradigm_metadata,
+                "block_number": block_number,
+                "trial_in_block": trial_in_block,
+                "global_trial": global_trial,
+                "target_position": target_position,
+                "target_command": target_id,
+                "target_label": target_label,
+            }
+            body.append(
+                Step(
+                    "",
+                    "",
+                    trial_prepare_seconds,
+                    "p300_trial_start",
+                    802,
+                    block,
+                    trial_in_block,
+                    metadata={
+                        **trial_metadata,
+                        "flash_position": None,
+                        "p300_status": f"目标：{target_label}",
+                    },
+                    visual="p300_grid",
+                )
+            )
+            previous_position: int | None = None
+            for sequence in range(1, sequences_per_trial + 1):
+                flash_order = _build_p300_sequence(rng, previous_position)
+                previous_position = flash_order[-1]
+                for position_in_sequence, flash_position in enumerate(flash_order, start=1):
+                    flash_id, flash_label, _flash_icon = P300_COMMANDS[flash_position]
+                    body.append(
+                        Step(
+                            "",
+                            "",
+                            P300_SOA_SECONDS,
+                            "p300_flash",
+                            803,
+                            block,
+                            trial_in_block,
+                            metadata={
+                                **trial_metadata,
+                                "sequence": sequence,
+                                "position_in_sequence": position_in_sequence,
+                                "flash_position": flash_position,
+                                "flash_command": flash_id,
+                                "flash_label": flash_label,
+                                "is_target": flash_position == target_position,
+                                "p300_status": f"目标：{target_label}",
+                            },
+                            visual="p300_grid",
+                            text_duration=P300_HIGHLIGHT_SECONDS,
+                            text_after="",
+                        )
+                    )
+            body.append(
+                Step(
+                    "",
+                    "",
+                    trial_interval_seconds,
+                    "p300_trial_end",
+                    804,
+                    block,
+                    trial_in_block,
+                    metadata={
+                        **trial_metadata,
+                        "flash_position": None,
+                        "p300_status": f"Trial {trial_in_block} 完成",
+                    },
+                    visual="p300_grid",
+                )
+            )
+        body.append(
+            Step(
+                "Block 完成",
+                f"第 {block_number}/{block_count} 个 Block 已完成",
+                0.5 if short else 1.0,
+                "p300_block_end",
+                805,
+                block,
+                metadata={
+                    **paradigm_metadata,
+                    "block_number": block_number,
+                    "block_count": block_count,
+                },
+            )
+        )
+        if block_number < block_count:
+            body.append(
+                Step(
+                    "休息",
+                    "请放松视线；倒计时结束后继续下一 Block",
+                    rest_seconds,
+                    "p300_rest_start",
+                    806,
+                    block,
+                    completion_event="p300_rest_end",
+                    completion_code=807,
+                    metadata={
+                        **paradigm_metadata,
+                        "completed_block": block_number,
+                        "next_block": block_number + 1,
+                    },
+                    start_sound="rest_start",
+                    warning_sound="ending_soon",
+                    warning_at=5.0 if not short else None,
+                )
+            )
+    body.append(
+        Step(
+            "P300 任务负荷评分",
+            "请按 0–100 分填写本模块的总体体验",
+            0.0,
+            "p300_rating_start",
+            808,
+            "p300_rating",
+            advance="form",
+            completion_event="p300_rating",
+            completion_code=809,
+            metadata={
+                **paradigm_metadata,
+                "rating_instrument": "raw_nasa_tlx",
+            },
+            fields=(
+                InputField("mental_demand", "脑力需求（0=很低，100=很高）", "number", 0, 100),
+                InputField("physical_demand", "体力需求（0=很低，100=很高）", "number", 0, 100),
+                InputField("temporal_demand", "时间压力（0=很低，100=很高）", "number", 0, 100),
+                InputField("performance", "自评表现（0=很好，100=很差）", "number", 0, 100),
+                InputField("effort", "努力程度（0=很低，100=很高）", "number", 0, 100),
+                InputField("frustration", "挫败程度（0=很低，100=很高）", "number", 0, 100),
+            ),
+        )
+    )
+    return _experiment_bounds("m7_p300", body)
+
+
 def build_m5_plan(short: bool = False, **_: object) -> list[Step]:
     del short
-    task_choices = ("M1 运动想象", "M2 认知负荷", "M3A 安全动作", "M3B 疲劳", "M4A 意图", "M4B 目标注意", "不适用")
+    task_choices = (
+        "M1 运动想象",
+        "M2 认知负荷",
+        "M3A 安全动作",
+        "M3B 疲劳",
+        "M4A 意图",
+        "M4B 目标注意",
+        "M7 P300",
+        "不适用",
+    )
     body = [
         Step(
             "结束问卷",
@@ -1291,6 +1524,7 @@ def build_protocol_plan(
         "m3b_fatigue": build_m3b_plan,
         "m4a_intent": build_m4a_plan,
         "m4b_target": build_m4b_plan,
+        "m7_p300": build_m7_plan,
         "m6_readiness": build_m6_plan,
         "m5_debrief": build_m5_plan,
     }

@@ -5,7 +5,13 @@ from bsense_experiment.app import (
     build_xdf_filename,
     validate_identifier,
 )
-from bsense_experiment.protocols import PROTOCOLS, build_protocol_plan
+from bsense_experiment.protocols import (
+    P300_COMMANDS,
+    P300_HIGHLIGHT_SECONDS,
+    P300_SOA_SECONDS,
+    PROTOCOLS,
+    build_protocol_plan,
+)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -179,6 +185,63 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(all(step.metadata["fnirs_analysis_scope"] == "block_level_only" for step in highlights))
         rating = next(step for step in plan if step.event == "target_attention_rating_start")
         self.assertEqual(rating.advance, "form")
+
+    def test_m7_short_plan_has_balanced_reproducible_p300_sequences(self) -> None:
+        first = build_protocol_plan("m7_p300", short=True, seed=42)
+        second = build_protocol_plan("m7_p300", short=True, seed=42)
+        flashes = [step for step in first if step.event == "p300_flash"]
+        repeated_flashes = [step for step in second if step.event == "p300_flash"]
+        trials = [step for step in first if step.event == "p300_trial_start"]
+
+        self.assertEqual(len(trials), len(P300_COMMANDS))
+        self.assertEqual(len(flashes), len(P300_COMMANDS) ** 2)
+        self.assertEqual(
+            [step.metadata["flash_position"] for step in flashes],
+            [step.metadata["flash_position"] for step in repeated_flashes],
+        )
+        self.assertEqual(
+            {step.metadata["target_command"] for step in trials},
+            {command_id for command_id, _label, _icon in P300_COMMANDS},
+        )
+        self.assertTrue(all(step.duration == P300_SOA_SECONDS for step in flashes))
+        self.assertTrue(all(step.text_duration == P300_HIGHLIGHT_SECONDS for step in flashes))
+        self.assertTrue(all(step.visual == "p300_grid" for step in flashes))
+        for trial in range(1, len(P300_COMMANDS) + 1):
+            trial_flashes = [step for step in flashes if step.trial == trial]
+            self.assertEqual(
+                {step.metadata["flash_position"] for step in trial_flashes},
+                set(range(len(P300_COMMANDS))),
+            )
+            self.assertEqual(sum(bool(step.metadata["is_target"]) for step in trial_flashes), 1)
+
+    def test_m7_full_plan_matches_acquisition_scale_and_nasa_tlx(self) -> None:
+        plan = build_protocol_plan("m7_p300", seed=42)
+        trials = [step for step in plan if step.event == "p300_trial_start"]
+        flashes = [step for step in plan if step.event == "p300_flash"]
+        target_counts = {
+            command_id: sum(step.metadata["target_command"] == command_id for step in trials)
+            for command_id, _label, _icon in P300_COMMANDS
+        }
+
+        self.assertEqual(len(trials), 360)
+        self.assertEqual(set(target_counts.values()), {60})
+        self.assertEqual(len(flashes), 21_600)
+        self.assertEqual(sum(bool(step.metadata["is_target"]) for step in flashes), 3_600)
+        self.assertEqual(sum(step.event == "p300_rest_start" for step in plan), 2)
+        for previous, current in zip(flashes, flashes[1:]):
+            if (
+                previous.block == current.block
+                and previous.trial == current.trial
+                and previous.metadata["sequence"] != current.metadata["sequence"]
+            ):
+                self.assertNotEqual(
+                    previous.metadata["flash_position"],
+                    current.metadata["flash_position"],
+                )
+        rating = next(step for step in plan if step.event == "p300_rating_start")
+        self.assertEqual(rating.advance, "form")
+        self.assertEqual(rating.metadata["rating_instrument"], "raw_nasa_tlx")
+        self.assertEqual(len(rating.fields), 6)
 
     def test_m4a_balances_objects_within_each_condition(self) -> None:
         plan = build_protocol_plan("m4a_intent", seed=42)

@@ -40,7 +40,7 @@ Recorder built-in XDF
 12. 确认没有重复发布的第二组 EEG/fNIRS 等设备流；内置录制器遇到同类重复流会拒绝开始，并只录制校验通过的 8 条预期流。
 13. 开始录制后不得再启动缺失流；内置录制器会锁定模块开始时的 8 条流。
 14. 试听中文女声过渡提示并确认音量舒适；若研究方案不允许听觉提示，应在首页关闭。
-15. M1、M2、M4A、M4B 已在正式录制外完成指导与练习。
+15. M1、M2、M4A、M4B、M7 已在正式录制外完成指导与练习。
 16. 已确定本次会话是否执行 M5，并预先约定不适事件的停止与处理流程。
 17. 正式 M2 的按键正误颜色反馈已关闭。
 
@@ -81,6 +81,7 @@ Recorder built-in XDF
 - 随机化任务的 Marker 均含 `protocol_seed`；
 - M4B 每轮恰有一个 `is_target=true` 的高亮；
 - M4A Marker 明确为 `externally_cued_intent`，M4B fNIRS 分析范围明确为 `block_level_only`；
+- M7 正式流程包含 360 个 `p300_trial_start`、21,600 个 `p300_flash`；每个 Trial 恰有 10 个完整 Sequence，每个 Sequence 六个位置各出现一次且恰有一个 `is_target=true`；Raw NASA-TLX 六个字段均已提交；
 - 执行 M5 时，结束问卷所有结构化字段均已提交；
 - 执行 M6 时，正式 `sart_stimulus`/`sart_trial_result` 各 180 条、No-Go 共 20 条且不连续；每个按键最多一个 `sart_response`，小于 100 ms 的响应标为 `false_start`；
 - M6 正式先导数据必须有 `readiness_protocol_version=m6_reference_v1`、采前/采后 KSS、精确睡眠与咖啡因字段；复测必须有非空且不同于当前 Run 的 `parent_run_id` 和大于 0 的休息分钟数；

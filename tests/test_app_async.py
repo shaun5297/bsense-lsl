@@ -10,6 +10,8 @@ from bsense_experiment.app import (
     ACQUISITION_BATCH_PRESETS,
     BSenseExperimentApp,
     CUSTOM_ACQUISITION_BATCH,
+    P300_HIGHLIGHT_BG,
+    P300_TARGET_BORDER,
     QUICK_READINESS_LABEL,
     THREE_BATCH_1_LABEL,
     THREE_BATCH_2_LABEL,
@@ -52,6 +54,22 @@ class FakeLabel:
 
     def configure(self, **options: object) -> None:
         self.options.update(options)
+
+
+class FakeGridWidget(FakeLabel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.visible = False
+        self.raised = False
+
+    def grid(self) -> None:
+        self.visible = True
+
+    def grid_remove(self) -> None:
+        self.visible = False
+
+    def tkraise(self) -> None:
+        self.raised = True
 
 
 class FakeVariable:
@@ -202,6 +220,30 @@ class AppAsyncTests(unittest.TestCase):
         self.assertTrue(warning)
         self.assertEqual(acceleration_span, 0.0)
         self.assertEqual(gyroscope_span, 7.0)
+
+    def test_p300_grid_distinguishes_target_border_and_current_flash(self) -> None:
+        app = BSenseExperimentApp.__new__(BSenseExperimentApp)
+        app.image_label = FakeGridWidget()
+        app.p300_target_label = FakeLabel()
+        app.p300_grid_frame = FakeGridWidget()
+        app.p300_cells = {
+            position: (FakeLabel(), FakeLabel(), FakeLabel())
+            for position in range(6)
+        }
+
+        displayed = app._display_p300_grid(
+            target_position=2,
+            flash_position=4,
+            status="目标：左转",
+        )
+
+        self.assertTrue(displayed)
+        self.assertEqual(app.p300_target_label.options["text"], "目标：左转")
+        self.assertEqual(app.p300_cells[2][0].options["highlightbackground"], P300_TARGET_BORDER)
+        self.assertEqual(app.p300_cells[4][0].options["bg"], P300_HIGHLIGHT_BG)
+        self.assertEqual(app.p300_cells[4][0].options["highlightbackground"], P300_HIGHLIGHT_BG)
+        self.assertTrue(app.p300_grid_frame.visible)
+        self.assertTrue(app.p300_grid_frame.raised)
 
     def test_nback_feedback_marks_and_colors_a_false_alarm(self) -> None:
         app = BSenseExperimentApp.__new__(BSenseExperimentApp)

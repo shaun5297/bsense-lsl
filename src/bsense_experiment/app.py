@@ -39,6 +39,7 @@ from .platform_support import (
 )
 from .live import DataWindow, LiveStreamManager, STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, describe_stream
 from .protocols import (
+    P300_COMMANDS,
     PROTOCOLS,
     PROTOCOL_BY_TASK,
     InputField,
@@ -119,6 +120,9 @@ TASK_BG = "#141a22"
 TASK_FG = "#f5f7fa"
 TASK_MUTED_FG = "#9aa7b8"
 TASK_ACCENT = "#4da3ff"
+P300_NORMAL_BG = "#243447"
+P300_HIGHLIGHT_BG = "#00e5ff"
+P300_TARGET_BORDER = "#ff7a45"
 BSENSE_EEG_RAIL_ABS = 375_000.0
 BSENSE_EEG_RAIL_TOLERANCE = 1_000.0
 MI_ACCEL_SPAN_WARNING = 0.08
@@ -418,6 +422,7 @@ class BSenseExperimentApp:
         self.form_variables: dict[str, StringVar] = {}
         self.form_error = StringVar(value="")
         self.object_images: dict[str, PhotoImage] = {}
+        self.p300_cells: dict[int, tuple[Frame, Label, Label]] = {}
         self.audio_warning_played = False
         self.motion_warning_generation: int | None = None
         self.pending_next_task: str | None = None
@@ -981,6 +986,49 @@ class BSenseExperimentApp:
         self.image_label = Label(self.task_content, bg=TASK_BG)
         self.image_label.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
         self.image_label.grid_remove()
+        self.p300_grid_frame = Frame(self.task_content, bg=TASK_BG, padx=28, pady=12)
+        self.p300_grid_frame.grid(row=0, column=0, rowspan=3, sticky="nsew")
+        self.p300_target_label = Label(
+            self.p300_grid_frame,
+            text="",
+            bg=TASK_BG,
+            fg=P300_TARGET_BORDER,
+            font=(UI_FONT_FAMILY, 24, "bold"),
+        )
+        self.p300_target_label.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 14))
+        for position, (_command_id, command_label, command_icon) in enumerate(P300_COMMANDS):
+            row, column = divmod(position, 3)
+            cell = Frame(
+                self.p300_grid_frame,
+                bg=P300_NORMAL_BG,
+                highlightthickness=4,
+                highlightbackground=P300_NORMAL_BG,
+                padx=24,
+                pady=16,
+            )
+            cell.grid(row=row + 1, column=column, sticky="nsew", padx=8, pady=8)
+            icon_label = Label(
+                cell,
+                text=command_icon,
+                bg=P300_NORMAL_BG,
+                fg=TASK_FG,
+                font=(UI_FONT_FAMILY, 56, "bold"),
+            )
+            icon_label.pack(expand=True, fill="both")
+            text_label = Label(
+                cell,
+                text=command_label,
+                bg=P300_NORMAL_BG,
+                fg=TASK_FG,
+                font=(UI_FONT_FAMILY, 22, "bold"),
+            )
+            text_label.pack(fill="x", pady=(2, 0))
+            self.p300_cells[position] = (cell, icon_label, text_label)
+        for column in range(3):
+            self.p300_grid_frame.columnconfigure(column, weight=1, uniform="p300_column")
+        for row in (1, 2):
+            self.p300_grid_frame.rowconfigure(row, weight=1, uniform="p300_row")
+        self.p300_grid_frame.grid_remove()
         self.cue_label = Label(
             self.task_content,
             text="",
@@ -1192,6 +1240,7 @@ class BSenseExperimentApp:
         return 48
 
     def _display_visual(self, visual: str | None) -> bool:
+        self.p300_grid_frame.grid_remove()
         image = self.object_images.get(visual or "")
         if image is None:
             self.image_label.configure(image="")
@@ -1200,6 +1249,44 @@ class BSenseExperimentApp:
         self.image_label.configure(image=image)
         self.image_label.grid()
         return True
+
+    def _display_p300_grid(
+        self,
+        target_position: int | None,
+        flash_position: int | None,
+        status: str,
+    ) -> bool:
+        self.image_label.configure(image="")
+        self.image_label.grid_remove()
+        self.p300_target_label.configure(text=status)
+        for position, (cell, icon_label, text_label) in self.p300_cells.items():
+            highlighted = position == flash_position
+            background = P300_HIGHLIGHT_BG if highlighted else P300_NORMAL_BG
+            foreground = TASK_BG if highlighted else TASK_FG
+            border = (
+                P300_HIGHLIGHT_BG
+                if highlighted
+                else P300_TARGET_BORDER
+                if position == target_position
+                else P300_NORMAL_BG
+            )
+            cell.configure(bg=background, highlightbackground=border)
+            icon_label.configure(bg=background, fg=foreground)
+            text_label.configure(bg=background, fg=foreground)
+        self.p300_grid_frame.grid()
+        self.p300_grid_frame.tkraise()
+        return True
+
+    def _display_step_visual(self, step: Step) -> bool:
+        if step.visual != "p300_grid":
+            return self._display_visual(step.visual)
+        target = step.metadata.get("target_position")
+        flash = step.metadata.get("flash_position")
+        return self._display_p300_grid(
+            target if isinstance(target, int) else None,
+            flash if isinstance(flash, int) else None,
+            str(step.metadata.get("p300_status", "")),
+        )
 
     def _hide_inline_form(self) -> None:
         self.form_frame.grid_remove()
@@ -1452,7 +1539,7 @@ class BSenseExperimentApp:
         if not all((self.operator_ready.get(), self.streams_ready.get(), self.recorder_ready.get())):
             self._show_setup_error("请完成“录制检查”页的前三项开始前确认。", 2)
             return
-        practice_tasks = {"m1_mi", "m2_nback", "m4a_intent", "m4b_target"}
+        practice_tasks = {"m1_mi", "m2_nback", "m4a_intent", "m4b_target", "m7_p300"}
         if any(task in practice_tasks for task in selected) and not self.practice_ready.get():
             self._show_setup_error("所选任务需要先完成指导与练习，请在“录制检查”页确认。", 2)
             return
@@ -1518,6 +1605,8 @@ class BSenseExperimentApp:
             self.current_context["readiness_protocol_version"] = (
                 "m6_reference_v1" if self.readiness_reference.get() else "m6_rules_v1"
             )
+        if task == "m7_p300":
+            self.current_context["p300_protocol_version"] = "m7_p300_v1"
         nback_order = "counterbalanced" if self.nback_order.get().startswith("拉丁方") else "ascending"
         if task == "m2_nback":
             self.current_context["nback_order"] = nback_order
@@ -1985,7 +2074,7 @@ class BSenseExperimentApp:
         self.step_text_replaced = False
         self.audio_warning_played = False
         self._hide_inline_form()
-        has_image = self._display_visual(step.visual)
+        has_image = self._display_step_visual(step)
         self.cue_label.configure(
             text=step.text,
             font=(UI_FONT_FAMILY, self._cue_font_size(step.text, has_image), "bold"),
@@ -1994,6 +2083,8 @@ class BSenseExperimentApp:
         self.detail_label.configure(text=step.detail)
         self.progress_label.configure(text=f"步骤 {self.step_index + 1}/{len(self.plan)}")
         self.module_progress.configure(value=self.step_index + 1)
+        if step.event == "p300_flash":
+            self.countdown_label.configure(text="")
         self.action_button.pack_forget()
         self.action_button.configure(state="disabled")
         self.secondary_button.pack_forget()
@@ -2283,14 +2374,24 @@ class BSenseExperimentApp:
         remaining = max(0.0, step.duration - elapsed)
         if step.text_duration is not None and elapsed >= step.text_duration and not self.step_text_replaced:
             replacement = step.text_after or ""
-            self._display_visual(None)
+            if step.visual == "p300_grid":
+                target = step.metadata.get("target_position")
+                self._display_p300_grid(
+                    target if isinstance(target, int) else None,
+                    None,
+                    str(step.metadata.get("p300_status", "")),
+                )
+            else:
+                self._display_visual(None)
             self.cue_label.configure(
                 text=replacement,
                 font=(UI_FONT_FAMILY, self._cue_font_size(replacement, False), "bold"),
                 foreground=self.default_cue_foreground,
             )
             self.step_text_replaced = True
-        self.countdown_label.configure(text=f"{remaining:0.1f} s")
+        is_p300_flash = step.event == "p300_flash"
+        if not is_p300_flash:
+            self.countdown_label.configure(text=f"{remaining:0.1f} s")
         if (
             step.warning_sound is not None
             and step.warning_at is not None
@@ -2331,7 +2432,11 @@ class BSenseExperimentApp:
                 expected_step_index=step_index,
             )
             return
-        self.tick_id = self.root.after(50, lambda: self._tick_step(generation, step_index))
+        tick_interval_ms = 5 if is_p300_flash else 50
+        self.tick_id = self.root.after(
+            tick_interval_ms,
+            lambda: self._tick_step(generation, step_index),
+        )
 
     def _push_marker(self, payload: dict) -> float:
         timestamp = local_clock()

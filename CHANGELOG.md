@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 新增 M7 六宫格 P300 指令采集：六类控制指令按可复现随机顺序高亮，正式流程为 3 Block、每目标每 Block 20 Trial、每 Trial 10 Sequence，使用 100 ms 高亮和 175 ms SOA；逐 Trial/逐闪烁 Marker、区块休息、Raw NASA-TLX 与短联调流程均接入统一 XDF 录制和全屏任务界面；
 - M6 新增默认开启的研究标签模式：采集精确睡眠时长、最近睡眠时段、连续清醒时长、咖啡因剂量/时间和采后 KSS；由 `parent_run_id` 与实际休息分钟自动推导首次/复测，避免人工状态与会话关联不一致；
 - 新增固定 3 分钟 PVT 研究参照，采用 1–4 秒随机响应—刺激间隔、100 ms 抢按阈值、355 ms PVT-B lapse 阈值和 30 秒超时；逐刺激、响应、结果及汇总均写入 Marker，但明确不进入当前 `rules_v1_provisional` 四态规则；
 - 修复 Windows/macOS 多网卡环境下同一组 LSL outlet 被解析为多个视图、导致六类 BioMultiLite 数值流同时误报重复的问题；录制器现按 `source_id` 或 outlet 创建时间与完整元数据识别同一发布实例，不同发布实例仍会阻止录制，并在严格选择前保存完整发现诊断；
