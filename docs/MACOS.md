@@ -38,7 +38,7 @@ cd "/path/to/bsense-lsl"
 bash "macos/setup.sh"
 ```
 
-安装脚本只在仓库内创建 `.venv`，安装固定版本 `pylsl==1.18.2`，然后执行协议和单元测试。若机器上没有带 Tk 的 Python 3.11–3.13，脚本会先尝试通过 Homebrew 自动安装（已装解释器缺 Tk 时补装 `python-tk`，否则安装 `python@3.13` 与 `python-tk@3.13`）；未安装 Homebrew 时会给出提示并退出。损坏或来自其他系统的 `.venv` 会自动移开（`.venv.bak.*`）并重建，无需手动删除。若默认 `python3` 不合适，也可通过环境变量指定兼容解释器：
+安装脚本只在仓库内创建 `.venv`，安装固定版本 `pylsl==1.18.2`，然后执行协议和单元测试。脚本只使用机器上已有的 Python，不自动下载安装；找不到带 Tk 的 Python 3.11–3.13 时会给出安装指引（如 `brew install python@3.13 python-tk@3.13`）并退出。损坏或来自其他系统的 `.venv` 会自动移开（`.venv.bak.*`）并重建，无需手动删除。若默认 `python3` 不合适，也可通过环境变量指定兼容解释器：
 
 ```bash
 BSENSE_PYTHON="/path/to/python3.12" bash "macos/setup.sh"

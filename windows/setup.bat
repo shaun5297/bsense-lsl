@@ -10,24 +10,16 @@ if exist "%VENV%\pyvenv.cfg" if not exist "%VENV%\Scripts\python.exe" (
   ren "%VENV%" ".venv.bak.%RANDOM%%RANDOM%"
 )
 if exist "%VENV%\Scripts\python.exe" (
-  "%VENV%\Scripts\python.exe" -c "import sys, tkinter; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" >nul 2>nul
+  "%VENV%\Scripts\python.exe" -c "import sys, tkinter; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] <= (3, 13) else 1)" >nul 2>nul
   if errorlevel 1 (
-    echo [提示] %VENV% 不是有效的 Python 3.13 Tk 环境，已移动并重新创建。
+    echo [提示] %VENV% 不是有效的 Python 3.11-3.13 Tk 环境，已移动并重新创建。
     ren "%VENV%" ".venv.bak.%RANDOM%%RANDOM%"
   )
 )
 
-rem --- 查找带 Tk 的 Python 3.13，缺失时通过 winget 自动安装 ---
+rem --- 查找带 Tk 的 Python 3.13，本脚本不自动下载安装 ---
 set "PYTHON_EXE="
 call :find_python
-if not defined PYTHON_EXE (
-  where winget >nul 2>nul
-  if errorlevel 1 goto :no_python
-  echo [安装] 未找到 Python 3.13，正在通过 winget 自动安装 ...
-  winget install -e --id Python.Python.3.13 --accept-source-agreements --accept-package-agreements
-  if errorlevel 1 goto :no_python
-  call :find_python
-)
 if not defined PYTHON_EXE goto :no_python
 
 if not exist "%VENV%\Scripts\python.exe" (
@@ -35,9 +27,9 @@ if not exist "%VENV%\Scripts\python.exe" (
   if errorlevel 1 goto :failed
 )
 
-"%VENV%\Scripts\python.exe" -c "import sys, tkinter; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" >nul 2>nul
+"%VENV%\Scripts\python.exe" -c "import sys, tkinter; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] <= (3, 13) else 1)" >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] %VENV% 创建失败或不是有效的 Python 3.13 Tk 环境。
+  echo [ERROR] %VENV% 创建失败或不是有效的 Python 3.11-3.13 Tk 环境。
   goto :failed
 )
 
@@ -53,7 +45,7 @@ if errorlevel 1 goto :failed
 if errorlevel 1 goto :failed
 
 echo.
-echo [OK] Python 3.13 environment is ready: %VENV%
+echo [OK] Python 3.11-3.13 environment is ready: %VENV%
 pause
 exit /b 0
 
@@ -61,21 +53,29 @@ exit /b 0
 set "PYTHON_EXE="
 where py >nul 2>nul
 if not errorlevel 1 (
-  py -3.13 -c "import sys, tkinter" >nul 2>nul
-  if not errorlevel 1 (
-    for /f "delims=" %%P in ('py -3.13 -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%P"
+  for %%V in (3.13 3.12 3.11) do (
+    if not defined PYTHON_EXE (
+      py -%%V -c "import sys, tkinter" >nul 2>nul
+      if not errorlevel 1 (
+        for /f "delims=" %%P in ('py -%%V -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%P"
+      )
+    )
   )
 )
 if defined PYTHON_EXE exit /b 0
-if exist "%LocalAppData%\Programs\Python\Python313\python.exe" (
-  "%LocalAppData%\Programs\Python\Python313\python.exe" -c "import sys, tkinter" >nul 2>nul
-  if not errorlevel 1 set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python313\python.exe"
+for %%D in (Python313 Python312 Python311) do (
+  if not defined PYTHON_EXE (
+    if exist "%LocalAppData%\Programs\Python\%%D\python.exe" (
+      "%LocalAppData%\Programs\Python\%%D\python.exe" -c "import sys, tkinter" >nul 2>nul
+      if not errorlevel 1 set "PYTHON_EXE=%LocalAppData%\Programs\Python\%%D\python.exe"
+    )
+  )
 )
 exit /b 0
 
 :no_python
 echo.
-echo [ERROR] 未找到带 Tk 的 Python 3.13，且无法自动安装（未检测到 winget）。
+echo [ERROR] 未找到带 Tk 的 Python 3.11-3.13，本脚本不自动下载安装。
 echo 请从 https://www.python.org/downloads/windows/ 安装 Python 3.13 x64
 echo （安装时勾选 py launcher 与 tcl/tk），然后重新运行本脚本。
 pause
