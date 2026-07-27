@@ -21,6 +21,7 @@
 - 事件码表补齐 deviceqc `block_start_*`/`block_end_*` 与 `rest_open_final_*` 共享码的显式行，新增全模块 (event, code) ⊆ `event_codes.csv` 的一致性测试；内置录制器的流指纹数值字段在解析失败时回退默认值而不是抛异常。
 - M7 重设计为机器狗指令 P300 采集：宫格改为方向十字布局（上=前进、下=后退、左=左转、右=右转、中央=急停、左下=待机），每个 Trial 改为“目标提示 2 秒 → 5 Sequence 闪烁 → 指令下发（新增 `p300_command` Marker，含 `issued_command`）→ 试次间隔”的完整控制回合；正式规模调整为 3 Block × 6 指令 × 10 Trial（180 Trial、5,400 次闪烁），自动计时由约 75.3 分钟降至约 33.1 分钟。选择阶段隐藏目标边框与指令名（目标仅保留在 Marker 元数据），避免 target 与非 target 闪烁画面的低层视觉差异造成标签泄漏。
 - 环境安装脚本改进：macOS `setup.sh` 与 Windows `setup.bat` 只使用机器上已有的带 Tk Python 3.11–3.13（优先 3.13，降级版本可用即用），不自动下载安装，缺失时给出明确安装指引；两平台损坏或跨系统复制的 `.venv` 均自动移开（`.venv.bak.*`）并重建，不再要求手动删除。
+- 修复 Windows 双击 `setup.bat` 时因 UTF-8 中文与嵌套 `for /f` 被 `cmd.exe` 错误解析而闪退的问题：批处理输出改为 ASCII，脚本强制 CRLF，并新增实际执行安装脚本的 Windows CI 冒烟测试。
 - PVT `trial_invalid` 改为作用于最近一条结果行：最近结果是等待期抢按时只作废该抢按行（退出汇总），不再错误回退到上一刺激试次。
 - M6 判定修正：No-Go 上的抢按现同时归为 `commission`（抑制错误率不再漏计）并保留 `false_start` 标志；`shift_type` 缺失/无效与文档一致地判为“无法评估”；KSS 缺失不再重复产生 `invalid_kss`；练习试次与被 `trial_invalid` 标记的正式试次不进入计分；`false_start` 字段只在 SART 响应 Marker 中输出，不再写入 N-Back Marker；SART 数字显示由 0.25 秒延长至 0.5 秒（每个试次仍为 1 秒，总时长不变）。
 

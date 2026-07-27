@@ -66,6 +66,16 @@ class ReleaseBuildTests(unittest.TestCase):
             checksum_path = self.release.write_checksum(archive_path)
             self.assertNotIn(b"\r", checksum_path.read_bytes())
 
+    def test_windows_setup_is_ascii_crlf_and_avoids_nested_for_f(self) -> None:
+        setup_path = PROJECT_ROOT / "windows" / "setup.bat"
+        setup_bytes = setup_path.read_bytes()
+        setup_bytes.decode("ascii")
+        self.assertIn(b"\r\n", setup_bytes)
+        self.assertNotIn(b"\n", setup_bytes.replace(b"\r\n", b""))
+        self.assertNotIn(b"for /f", setup_bytes.lower())
+        attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="ascii")
+        self.assertIn("*.bat text eol=crlf", attributes)
+
 
 if __name__ == "__main__":
     unittest.main()
