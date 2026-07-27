@@ -15,6 +15,10 @@
 - 修复 `event_codes.csv` 中 deviceqc 事件名与实际 Marker 不一致的问题（`blink`/`jaw_clench`/`head_left`/`head_right`/`head_nod`/`head_cancel`），移除从未发送的 121/131 结束码；
 - 修复 RCS 模式下进入下一模块时重新解析端口文本可能抛出异常的问题，现复用启动时已校验的端口；
 - 计时节拍由 100 ms 加密至 50 ms，试次间隔抖动减半；N-Back 颜色反馈只在字母显示阶段给出，注视十字阶段的晚响应不再覆盖“+”（Marker 记 `feedback_shown=false`），且反馈显示后试次最后 0.5 秒仍会切换回注视十字。
+- **事件码 breaking 变更（自 M6 引入，本版起显式标注）**：710/711 由旧版的 `readiness_context_start`/`readiness_context` 改为 `readiness_background_start`/`readiness_background`，采前状态表单改用新码 716/717；合并分析新旧 XDF 时必须按软件版本区分这两个码的含义。
+- PVT 修正：等待期抢按只记录并提示“过早”，不再取消已排程刺激或重抽 ISI（按住空格不再能无限推迟刺激）；步骤完成窗口内的按键不再产生乱序 Marker；`timeout` 行的 `reaction_time_s` 记为 null 而非 30 秒；刺激间隙内标记 `trial_invalid` 回退到最近一个试次并回写 `invalidated`。
+- M6 表单与判定加固：睡眠/咖啡因时间的 HH:MM 格式错误在背景表单本步即报错（不再到下一步才报且无法返回）；`normalize_readiness_context` 拒绝 NaN、负数和超过 24 小时的睡眠时长及负咖啡因，错误文案统一为中文；KSS 无法解析时报 `invalid_kss`、缺失时报 `missing_kss`。
+- 事件码表补齐 deviceqc `block_start_*`/`block_end_*` 与 `rest_open_final_*` 共享码的显式行，新增全模块 (event, code) ⊆ `event_codes.csv` 的一致性测试；内置录制器的流指纹数值字段在解析失败时回退默认值而不是抛异常。
 - M6 判定修正：No-Go 上的抢按现同时归为 `commission`（抑制错误率不再漏计）并保留 `false_start` 标志；`shift_type` 缺失/无效与文档一致地判为“无法评估”；KSS 缺失不再重复产生 `invalid_kss`；练习试次与被 `trial_invalid` 标记的正式试次不进入计分；`false_start` 字段只在 SART 响应 Marker 中输出，不再写入 N-Back Marker；SART 数字显示由 0.25 秒延长至 0.5 秒（每个试次仍为 1 秒，总时长不变）。
 
 ## 0.8.0

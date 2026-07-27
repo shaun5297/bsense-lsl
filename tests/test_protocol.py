@@ -1,4 +1,6 @@
+import csv
 import unittest
+from pathlib import Path
 
 from bsense_experiment.app import (
     build_deviceqc_plan,
@@ -12,6 +14,30 @@ from bsense_experiment.protocols import (
     PROTOCOLS,
     build_protocol_plan,
 )
+
+
+class EventCodeConsistencyTests(unittest.TestCase):
+    def test_every_emitted_event_code_pair_exists_in_csv(self) -> None:
+        csv_path = Path(__file__).resolve().parents[1] / "config" / "event_codes.csv"
+        with csv_path.open(encoding="utf-8") as handle:
+            documented = {(row["event_name"], int(row["code"])) for row in csv.DictReader(handle)}
+
+        emitted: set[tuple[str, int]] = set()
+        for protocol in PROTOCOLS:
+            variants = [
+                dict(short=short, seed=1, readiness_reference=reference)
+                for short in (False, True)
+                for reference in ((True, False) if protocol.task == "m6_readiness" else (True,))
+            ]
+            for kwargs in variants:
+                for step in build_protocol_plan(protocol.task, **kwargs):
+                    for event, code in ((step.event, step.code), (step.completion_event, step.completion_code)):
+                        if event is not None:
+                            self.assertIsNotNone(code, f"{protocol.task}:{event} 缺少事件码")
+                            emitted.add((event, int(code)))
+
+        undocumented = emitted - documented
+        self.assertEqual(undocumented, set(), f"未在 event_codes.csv 中登记的事件：{sorted(undocumented)}")
 
 
 class ProtocolTests(unittest.TestCase):

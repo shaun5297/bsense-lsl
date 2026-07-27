@@ -135,6 +135,43 @@ class ResolvedStreamView:
 
 
 class XDFWriterTests(unittest.TestCase):
+    def test_runtime_stream_key_tolerates_non_numeric_info_values(self) -> None:
+        class WeirdInfo:
+            def name(self) -> str:
+                return "BioMultiLite"
+
+            def type(self) -> str:
+                return "EEG"
+
+            def hostname(self) -> str:
+                return "host"
+
+            def channel_count(self) -> str:
+                return "eight"
+
+            def channel_format(self) -> None:
+                return None
+
+            def nominal_srate(self) -> str:
+                return "fast"
+
+            def source_id(self) -> str:
+                return "src-1"
+
+            def created_at(self) -> None:
+                return None
+
+            def uid(self) -> str:
+                return "uid-1"
+
+        key = EmbeddedRecorderClient._runtime_stream_key(WeirdInfo())
+        self.assertEqual(key[0], "source_id")
+        summary = EmbeddedRecorderClient._stream_summary(WeirdInfo())
+        self.assertEqual(summary["channel_count"], 0)
+        self.assertEqual(summary["channel_format"], 0)
+        self.assertEqual(summary["nominal_srate"], 0.0)
+        self.assertEqual(summary["created_at"], 0.0)
+
     def test_varlen_integer_boundaries(self) -> None:
         self.assertEqual(encode_varlen_int(255), b"\x01\xff")
         self.assertEqual(encode_varlen_int(256), b"\x04\x00\x01\x00\x00")

@@ -83,7 +83,7 @@ Recorder built-in XDF
 - M4A Marker 明确为 `externally_cued_intent`，M4B fNIRS 分析范围明确为 `block_level_only`；
 - M7 正式流程包含 360 个 `p300_trial_start`、21,600 个 `p300_flash`；每个 Trial 恰有 10 个完整 Sequence，每个 Sequence 六个位置各出现一次且恰有一个 `is_target=true`；Raw NASA-TLX 六个字段均已提交；
 - 执行 M5 时，结束问卷所有结构化字段均已提交；
-- 执行 M6 时，正式 `sart_stimulus`/`sart_trial_result` 各 180 条、No-Go 共 20 条且不连续；每个按键最多一个 `sart_response`，小于 100 ms 的响应标为 `false_start`；
+- 执行 M6 时，正式 `sart_stimulus`/`sart_trial_result` 各 180 条、No-Go 共 20 条且不连续；每个按键最多一个 `sart_response`，小于 100 ms 的响应带有 `false_start=true` 标志（No-Go 抢按的 `outcome` 归为 `commission`）；
 - M6 正式先导数据必须有 `readiness_protocol_version=m6_reference_v1`、采前/采后 KSS、精确睡眠与咖啡因字段；复测必须有非空且不同于当前 Run 的 `parent_run_id` 和大于 0 的休息分钟数；
 - 研究标签模式必须存在一次 `pvt_start`/`pvt_end`；每个 `pvt_stimulus` 最多对应一个 `pvt_trial_result`，PVT 汇总明确带有 `not_used_by_rules=true`，任务结束时未完成的刺激只能标为 `truncated` 且不进入汇总；
 - M6 必须存在一次 `readiness_assessment`，结果只能是四态之一，并包含规则版本、原因码、有效试次数和 EEG 质量门控统计；首次检测不得直接输出“建议休息”；

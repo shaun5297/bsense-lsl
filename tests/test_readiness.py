@@ -6,6 +6,7 @@ from bsense_experiment.readiness import (
     normalize_readiness_context,
     sleep_duration_band,
     summarize_sart_trials,
+    validate_readiness_background,
 )
 
 
@@ -90,6 +91,68 @@ class ReadinessRuleTests(unittest.TestCase):
         self.assertEqual(sleep_duration_band(6.0), "6–7小时")
         self.assertEqual(sleep_duration_band(7.0), "7–8小时")
         self.assertEqual(sleep_duration_band(8.0), "8小时及以上")
+
+    def test_normalize_rejects_invalid_sleep_hours(self) -> None:
+        base = {
+            "last_sleep_onset_time": "23:30",
+            "last_wake_time": "07:00",
+        }
+        for bad in (float("nan"), -1.0, 25.0, "abc", None):
+            with self.assertRaises(ValueError, msg=f"sleep_duration_hours={bad}"):
+                normalize_readiness_context(
+                    {**base, "sleep_duration_hours": bad},
+                    current_run_id="001",
+                )
+
+    def test_normalize_rejects_negative_caffeine_and_rest_without_parent(self) -> None:
+        base = {
+            "sleep_duration_hours": 7.0,
+            "last_sleep_onset_time": "23:30",
+            "last_wake_time": "07:00",
+        }
+        with self.assertRaisesRegex(ValueError, "咖啡因"):
+            normalize_readiness_context(
+                {**base, "caffeine_mg_last_8h": -5},
+                current_run_id="001",
+            )
+        with self.assertRaisesRegex(ValueError, "关联首次检测 Run"):
+            normalize_readiness_context(
+                {**base, "rest_duration_minutes": 15},
+                current_run_id="001",
+            )
+
+    def test_background_validation_checks_clock_times_with_leading_zero(self) -> None:
+        validate_readiness_background(
+            {"last_sleep_onset_time": "23:30", "last_wake_time": "07:00", "last_caffeine_time": ""}
+        )
+        with self.assertRaisesRegex(ValueError, "入睡时间"):
+            validate_readiness_background(
+                {"last_sleep_onset_time": "9:05", "last_wake_time": "07:00"}
+            )
+        with self.assertRaisesRegex(ValueError, "咖啡因"):
+            validate_readiness_background(
+                {
+                    "last_sleep_onset_time": "23:30",
+                    "last_wake_time": "07:00",
+                    "last_caffeine_time": "25:00",
+                }
+            )
+
+    def test_invalid_kss_positive_path(self) -> None:
+        context = {
+            "sleep_duration_band": "7–8小时",
+            "assessment_attempt": "首次",
+            "shift_type": "日班",
+        }
+        for bad_kss in (0, 10, "abc"):
+            result = assess_readiness(
+                {**context, "kss_score": bad_kss},
+                completed_trials(),
+                expected_trials=180,
+                signal_quality_ok=True,
+            )
+            self.assertEqual(result["status"], "unable")
+            self.assertIn("invalid_kss", result["reason_codes"])
 
     def test_sart_trial_classification_separates_false_starts_and_error_types(self) -> None:
         self.assertEqual(classify_sart_trial(True, 0.05)["outcome"], "false_start")

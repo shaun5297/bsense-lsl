@@ -132,12 +132,12 @@ M6 是赛道7的独立筛查流程，不要求工作中持续佩戴，也不依�
 2. 首次检测不填 `parent_run_id`；复测必须填写关联首次检测 Run 和实际休息分钟数，程序据此推导 `assessment_attempt`，并由精确睡眠时长派生兼容规则引擎的 `sleep_duration_band`；
 3. 30 秒 EEG 在线质量门控，并采集 45 秒睁眼当次基线；
 4. 4 个练习试次后完成 180 个、每个 1 秒的 SART/Go-NoGo 正式试次：数字显示 0.5 秒、随后 0.5 秒中央注视，除数字 3 外均按空格，数字 3 占 20 次且不连续出现；
-5. 记录采后 KSS，并执行固定 3 分钟 PVT：前一响应后随机等待 1–4 秒出现黄色毫秒计时数字，等待期抢按或刺激后小于 100 ms 的响应记为 `false_start`，不小于 355 ms 记为 PVT-B `lapse`，30 秒无响应记为 `timeout`；
+5. 记录采后 KSS，并执行固定 3 分钟 PVT：前一响应后随机等待 1–4 秒出现黄色毫秒计时数字，等待期抢按或刺激后小于 100 ms 的响应记为 `false_start`（只记录并提示“过早”，不打断已排程的刺激时序），不小于 355 ms 记为 PVT-B `lapse`，30 秒无响应记为 `timeout`（其 `reaction_time_s` 记为 null）；
 6. 输出“正常、建议复测、建议休息、无法评估”之一。PVT 和采后 KSS 作为独立研究参照保存在 `external_reference`，不进入当前四态规则。
 
 正式先导采集应保持“研究标签模式”开启；只需复现原 3–5 分钟比赛演示时可在首页关闭，Marker 会通过 `readiness_reference_enabled` 和 `readiness_protocol_version` 明确区分两种协议。
 
-响应小于 100 ms 单独标为 `false_start`，不再混入正常反应时；Go 无响应为 `omission`，No-Go 错按为 `commission`（含 No-Go 上的抢按：其 `outcome` 归为 `commission`，同时保留 `false_start` 标志并计入抢按率），No-Go 正确抑制为 `correct_rejection`。练习试次和操作员标记 `trial_invalid` 的正式试次不进入计分。首次检测出现任何风险阈值只输出“建议复测”，不会直接升级为“建议休息”；只有复测且高风险信号仍存在时才可输出“建议休息”。EEG 质量不合格、质量采样缺失或正式试次不足 90% 时输出“无法评估”，不能把缺失数据误判为正常。M6 的 SART 节奏固定为每试次 1 秒，不随“老年被试节奏”设置变化。
+响应小于 100 ms 单独标为 `false_start`，不再混入正常反应时；Go 无响应为 `omission`，No-Go 错按为 `commission`（含 No-Go 上的抢按：其 `outcome` 归为 `commission`，同时保留 `false_start` 标志并计入抢按率），No-Go 正确抑制为 `correct_rejection`。练习试次和操作员标记 `trial_invalid` 的正式试次不进入计分；PVT 中刺激间隙内标记无效时回退到最近一个试次。首次检测出现任何风险阈值只输出“建议复测”，不会直接升级为“建议休息”；只有复测且高风险信号仍存在时才可输出“建议休息”。EEG 质量不合格、质量采样缺失或正式试次不足 90% 时输出“无法评估”，不能把缺失数据误判为正常。M6 的 SART 节奏固定为每试次 1 秒，不随“老年被试节奏”设置变化。
 
 当前 `rules_v1_provisional` 使用可审计的 KSS、睡眠档和行为阈值，不使用尚未完成跨被试验证的 EEG 分类分数。EEG/fNIRS/Motion 仍随 XDF 保存，用于后续先导实验、按被试留出验证和模型替换。四态结果是竞赛原型的当班筛查与复测辅助，不是医疗诊断，也不得作为自动化上岗、处罚或永久能力标签。
 
@@ -161,7 +161,7 @@ M4B 不再要求右手运动想象。三个物体在中央串行出现，目标�
 
 ### M7 P300 指令采集
 
-M7 在 2×3 六宫格中显示前进、后退、左转、右转、急停和待机。每个 Trial 先以橙色边框提示一个目标，然后执行 10 个 Sequence；每个 Sequence 将六个格子各高亮一次，高亮 100 ms、刺激起始间隔（SOA）175 ms。顺序由 `participant:session:run:m7_p300` 派生的局部随机种子决定，并避免相邻 Sequence 边界重复同一格。
+M7 在 2×3 六宫格中显示前进、后退、左转、右转、急停和待机。每个 Trial 先以橙色边框提示一个目标，然后执行 10 个 Sequence；每个 Sequence 将六个格子各高亮一次，高亮 100 ms、刺激起始间隔（SOA）175 ms。顺序由 `participant:session:run:m7_p300` 派生的局部随机种子决定，并避免相邻 Sequence 边界重复同一格。SOA 与高亮时长为标称值：Marker 推送与界面调度存在毫秒级抖动，逐闪烁 P300 分析必须以 `p300_flash` Marker 的 LSL 时间戳重建真实 SOA，不能假设固定 175 ms。
 
 正式流程包含 3 个 Block；每个 Block 的六个目标各出现 20 个 Trial，共 360 Trial、21,600 次 `p300_flash`。每个闪烁 Marker 记录目标与闪烁位置、指令、Sequence 内位置和 `is_target`；Block 间休息 2 分钟，模块末提交六维 Raw NASA-TLX。短流程缩减为 1 Block、每目标 1 Trial、每 Trial 1 Sequence，只用于验证界面、时序 Marker 和录制链路。
 

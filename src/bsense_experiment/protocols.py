@@ -1454,7 +1454,9 @@ def build_m6_plan(
                 ),
                 Step(
                     "PVT 说明",
-                    "看到黄色计时数字后尽快按空格；等待期间不要抢按。任务持续 3 分钟。",
+                    f"看到黄色计时数字后尽快按空格；等待期间不要抢按。任务持续 {pvt_duration / 60:.0f} 分钟。"
+                    if not short
+                    else "看到黄色计时数字后尽快按空格；等待期间不要抢按。",
                     1.0 if short else 5.0,
                     "pvt_instruction",
                     735,
@@ -1492,7 +1494,11 @@ def build_m6_plan(
     body.append(
         Step(
             "正在生成结果",
-            "PVT 只作为独立研究参照，不进入当前四态规则。",
+            (
+                "PVT 只作为独立研究参照，不进入当前四态规则。"
+                if readiness_reference
+                else "结果仅供当班状态筛查与复测辅助。"
+            ),
             0.5 if short else 4.0,
             "readiness_assessment",
             730,
