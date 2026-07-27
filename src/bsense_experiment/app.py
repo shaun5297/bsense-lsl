@@ -40,6 +40,7 @@ from .platform_support import (
 from .live import DataWindow, LiveStreamManager, STREAM_KIND_LABELS, SUPPORTED_STREAM_KINDS, describe_stream
 from .protocols import (
     P300_COMMANDS,
+    P300_GRID_POSITIONS,
     PROTOCOLS,
     PROTOCOL_BY_TASK,
     InputField,
@@ -998,7 +999,7 @@ class BSenseExperimentApp:
         )
         self.p300_target_label.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 14))
         for position, (_command_id, command_label, command_icon) in enumerate(P300_COMMANDS):
-            row, column = divmod(position, 3)
+            grid_row, grid_column = P300_GRID_POSITIONS[position]
             cell = Frame(
                 self.p300_grid_frame,
                 bg=P300_NORMAL_BG,
@@ -1007,7 +1008,7 @@ class BSenseExperimentApp:
                 padx=24,
                 pady=16,
             )
-            cell.grid(row=row + 1, column=column, sticky="nsew", padx=8, pady=8)
+            cell.grid(row=grid_row + 1, column=grid_column, sticky="nsew", padx=8, pady=8)
             icon_label = Label(
                 cell,
                 text=command_icon,
@@ -1027,7 +1028,7 @@ class BSenseExperimentApp:
             self.p300_cells[position] = (cell, icon_label, text_label)
         for column in range(3):
             self.p300_grid_frame.columnconfigure(column, weight=1, uniform="p300_column")
-        for row in (1, 2):
+        for row in (1, 2, 3):
             self.p300_grid_frame.rowconfigure(row, weight=1, uniform="p300_row")
         self.p300_grid_frame.grid_remove()
         self.cue_label = Label(
@@ -1283,6 +1284,9 @@ class BSenseExperimentApp:
             return self._display_visual(step.visual)
         target = step.metadata.get("target_position")
         flash = step.metadata.get("flash_position")
+        # 指令下发阶段把目标格点亮为实心高亮，作为模拟机器狗执行的视觉反馈。
+        if step.metadata.get("phase") == "command_feedback" and isinstance(target, int):
+            flash = target
         return self._display_p300_grid(
             target if isinstance(target, int) else None,
             flash if isinstance(flash, int) else None,

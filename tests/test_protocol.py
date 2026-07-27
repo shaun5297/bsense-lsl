@@ -9,6 +9,7 @@ from bsense_experiment.app import (
 )
 from bsense_experiment.protocols import (
     P300_COMMANDS,
+    P300_GRID_POSITIONS,
     P300_HIGHLIGHT_SECONDS,
     P300_SOA_SECONDS,
     PROTOCOLS,
@@ -232,6 +233,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(all(step.duration == P300_SOA_SECONDS for step in flashes))
         self.assertTrue(all(step.text_duration == P300_HIGHLIGHT_SECONDS for step in flashes))
         self.assertTrue(all(step.visual == "p300_grid" for step in flashes))
+        commands = [step for step in first if step.event == "p300_command"]
+        self.assertEqual(len(commands), len(P300_COMMANDS))
+        self.assertTrue(all(step.metadata["phase"] == "command_feedback" for step in commands))
         for trial in range(1, len(P300_COMMANDS) + 1):
             trial_flashes = [step for step in flashes if step.trial == trial]
             self.assertEqual(
@@ -244,15 +248,23 @@ class ProtocolTests(unittest.TestCase):
         plan = build_protocol_plan("m7_p300", seed=42)
         trials = [step for step in plan if step.event == "p300_trial_start"]
         flashes = [step for step in plan if step.event == "p300_flash"]
+        commands = [step for step in plan if step.event == "p300_command"]
         target_counts = {
             command_id: sum(step.metadata["target_command"] == command_id for step in trials)
             for command_id, _label, _icon in P300_COMMANDS
         }
 
-        self.assertEqual(len(trials), 360)
-        self.assertEqual(set(target_counts.values()), {60})
-        self.assertEqual(len(flashes), 21_600)
-        self.assertEqual(sum(bool(step.metadata["is_target"]) for step in flashes), 3_600)
+        self.assertEqual(len(trials), 180)
+        self.assertEqual(set(target_counts.values()), {30})
+        self.assertEqual(len(flashes), 5_400)
+        self.assertEqual(sum(bool(step.metadata["is_target"]) for step in flashes), 900)
+        self.assertEqual(len(commands), 180)
+        for command_step in commands:
+            self.assertEqual(command_step.metadata["phase"], "command_feedback")
+            self.assertEqual(command_step.metadata["issued_command"], command_step.metadata["target_command"])
+            self.assertTrue(command_step.metadata["simulated_execution"])
+        self.assertTrue(all(step.metadata["phase"] == "cue" for step in trials))
+        self.assertTrue(all(step.metadata["sequences_per_trial"] == 5 for step in trials))
         self.assertEqual(sum(step.event == "p300_rest_start" for step in plan), 2)
         for previous, current in zip(flashes, flashes[1:]):
             if (
@@ -268,6 +280,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(rating.advance, "form")
         self.assertEqual(rating.metadata["rating_instrument"], "raw_nasa_tlx")
         self.assertEqual(len(rating.fields), 6)
+
+    def test_m7_grid_layout_is_directional_cross(self) -> None:
+        self.assertEqual(P300_GRID_POSITIONS[0], (0, 1))  # 前进在上
+        self.assertEqual(P300_GRID_POSITIONS[1], (2, 1))  # 后退在下
+        self.assertEqual(P300_GRID_POSITIONS[2], (1, 0))  # 左转在左
+        self.assertEqual(P300_GRID_POSITIONS[3], (1, 2))  # 右转在右
+        self.assertEqual(P300_GRID_POSITIONS[4], (1, 1))  # 急停居中
+        self.assertEqual(len(set(P300_GRID_POSITIONS.values())), len(P300_COMMANDS))
 
     def test_m4a_balances_objects_within_each_condition(self) -> None:
         plan = build_protocol_plan("m4a_intent", seed=42)
